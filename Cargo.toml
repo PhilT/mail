@@ -12,6 +12,10 @@ path = "src/lib.rs"
 name = "mail-triage"
 path = "src/bin/mail-triage.rs"
 
+[[bin]]
+name = "mail-dump"
+path = "src/bin/mail-dump.rs"
+
 [dependencies]
 anyhow = "1"
 crossterm = "0.29"

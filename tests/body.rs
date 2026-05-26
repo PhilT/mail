@@ -165,15 +165,22 @@ fn multipart_with_no_html_image_prefers_plaintext() {
 }
 
 #[test]
-fn multipart_with_html_image_uses_html_path() {
+fn multipart_with_html_image_uses_plaintext_body_and_appends_images() {
+    // Senders bundle a layout-table HTML with the real content in
+    // text/plain. The text body wins; HTML images are appended at the
+    // bottom under a "── images ──" separator.
     let msg = MessageParser::default().parse(MULTIPART_HTML_HAS_IMG).unwrap();
     let runs = mail::render_body(&msg);
+
+    let text = flatten_text(&runs);
+    assert!(text.contains("plain text without image"), "got: {text:?}");
+    assert!(!text.contains("html with image"), "html body leaked: {text:?}");
+
+    // Image still discoverable, just as an appended run.
     assert_eq!(
         url_refs(&runs),
         vec!["https://example.com/x.png"],
         "runs: {runs:?}",
     );
-    let text = flatten_text(&runs);
-    assert!(text.contains("html with image"), "got: {text:?}");
-    assert!(!text.contains("plain text without image"), "plain leaked: {text:?}");
+    assert!(text.contains("images"), "missing separator: {text:?}");
 }

@@ -26,21 +26,21 @@ const RENDER_WIDTH: usize = 120;
 ///   image, the HTML drives the output via the markdown pipeline.
 /// - HTML-only messages always go through the markdown pipeline.
 pub fn render_body(msg: &Message<'_>) -> Vec<BodyRun> {
-    let html = body_html_only(msg);
-    let want_html_path = html.as_deref().is_some_and(html_has_image)
-        || (html.is_some() && body_text_only(msg).is_none());
-
-    if want_html_path {
-        if let Some(html) = html.as_deref() {
-            return render_html(html);
-        }
-    }
+    // Plain-text-with-both: many senders ship a clean text/plain alongside
+    // a layout-table HTML version whose only visible content is the
+    // template logo and footer. Use the text for the body, then append any
+    // images the HTML mentions as a trailing "── images ──" block so they
+    // still appear.
     if let Some(text) = body_text_only(msg) {
-        return vec![BodyRun::Text(plain_lines(&text))];
+        let mut runs = vec![BodyRun::Text(plain_lines(&text))];
+        if let Some(html) = body_html_only(msg) {
+            runs.extend(image_runs_from_html(&html));
+        }
+        return runs;
     }
-    // Last resort: HTML existed but we didn't pick it above — render it.
-    if let Some(html) = html.as_deref() {
-        return render_html(html);
+    // HTML-only: full markdown pipeline so images appear inline.
+    if let Some(html) = body_html_only(msg) {
+        return render_html(&html);
     }
     Vec::new()
 }
@@ -51,10 +51,41 @@ fn plain_lines(text: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn html_has_image(html: &str) -> bool {
-    html.as_bytes()
-        .windows(4)
-        .any(|w| w.eq_ignore_ascii_case(b"<img"))
+/// Extract just the images from an HTML body (cid: and http(s)://), as
+/// `BodyRun`s preceded by a "── images ──" separator line. Used to attach
+/// imagery to a message we're rendering from its text/plain alternative.
+fn image_runs_from_html(html: &str) -> Vec<BodyRun> {
+    let options = html_to_markdown_rs::ConversionOptions::builder().build();
+    let Ok(result) = html_to_markdown_rs::convert(html, Some(options)) else {
+        return Vec::new();
+    };
+    let md = result.content.unwrap_or_default();
+
+    let mut images: Vec<BodyRun> = Vec::new();
+    let parser_options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
+    for event in Parser::new_ext(&md, parser_options) {
+        if let Event::Start(Tag::Image { dest_url, .. }) = event {
+            let url = dest_url.into_string();
+            if let Some(cid) = url.strip_prefix("cid:") {
+                images.push(BodyRun::Image(cid.to_string()));
+            } else if url.starts_with("http://") || url.starts_with("https://") {
+                images.push(BodyRun::Url(url));
+            }
+        }
+    }
+
+    if images.is_empty() {
+        return Vec::new();
+    }
+
+    let sep = Line::from(Span::styled(
+        "── images ──",
+        Style::default().fg(Color::DarkGray),
+    ));
+    let mut out = Vec::with_capacity(images.len() + 1);
+    out.push(BodyRun::Text(vec![Line::default(), sep, Line::default()]));
+    out.extend(images);
+    out
 }
 
 /// HTML → Markdown via `html-to-markdown-rs`, then walk pulldown-cmark
