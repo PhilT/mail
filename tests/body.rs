@@ -20,6 +20,9 @@ Content-Type: text/html; charset=utf-8\r\n\
 <script>alert('hi');</script>\
 </head><body><p>Hello html body.</p></body></html>\r\n";
 
+/// Marketing senders (eBay etc.) put raw CSS into their text/plain
+/// alternative. The HTML version is cleaner once run through html2text,
+/// so we prefer HTML when both exist.
 const MULTIPART_BOTH: &[u8] = b"From: a@b.com\r\n\
 Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
 Content-Type: multipart/alternative; boundary=\"BOUND\"\r\n\
@@ -27,11 +30,11 @@ Content-Type: multipart/alternative; boundary=\"BOUND\"\r\n\
 --BOUND\r\n\
 Content-Type: text/plain; charset=utf-8\r\n\
 \r\n\
-Plain text version is preferred.\r\n\
+.foo { color: red; } Plain text mixed with raw CSS noise.\r\n\
 --BOUND\r\n\
 Content-Type: text/html; charset=utf-8\r\n\
 \r\n\
-<html><body><p>HTML version, should not be used.</p></body></html>\r\n\
+<html><body><p>Clean HTML version.</p></body></html>\r\n\
 --BOUND--\r\n";
 
 #[test]
@@ -51,10 +54,38 @@ fn html_only_strips_style_and_script_content() {
     assert!(!out.contains("alert"), "<script> bled through: {out:?}");
 }
 
+/// Marketing mail (eBay-style) often has <style> tags inside <body>,
+/// sometimes wrapped in MSO conditional comments. html2text leaves their
+/// contents in the output, so the render leaks CSS rules. We pre-strip.
+const HTML_STYLE_IN_BODY: &[u8] = b"From: a@b.com\r\n\
+Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+\r\n\
+<html><body>\
+<!--[if !mso]><!-- -->\
+<style>.preheaderMod, .preheaderMod div { color: #111820; }</style>\
+<!--<![endif]-->\
+<p>Real text before.</p>\
+<style>@media (prefers-color-scheme:dark) { .foo {background: #000;} }</style>\
+<p>Real text after.</p>\
+<script>alert('xss');</script>\
+</body></html>\r\n";
+
 #[test]
-fn multipart_prefers_plaintext_over_html() {
+fn html_strips_style_and_script_anywhere_in_body() {
+    let msg = MessageParser::default().parse(HTML_STYLE_IN_BODY).unwrap();
+    let out = mail::render_body(&msg);
+    assert!(out.contains("Real text before."), "got: {out:?}");
+    assert!(out.contains("Real text after."), "got: {out:?}");
+    assert!(!out.contains(".preheaderMod"), "<style> bled through: {out:?}");
+    assert!(!out.contains("prefers-color-scheme"), "<style> bled through: {out:?}");
+    assert!(!out.contains("alert"), "<script> bled through: {out:?}");
+}
+
+#[test]
+fn multipart_prefers_html2text_rendered_html_over_noisy_plaintext() {
     let msg = MessageParser::default().parse(MULTIPART_BOTH).unwrap();
     let out = mail::render_body(&msg);
-    assert!(out.contains("Plain text version is preferred."), "got: {out:?}");
-    assert!(!out.contains("HTML version"), "got: {out:?}");
+    assert!(out.contains("Clean HTML version."), "got: {out:?}");
+    assert!(!out.contains(".foo"), "noisy plain leaked through: {out:?}");
 }

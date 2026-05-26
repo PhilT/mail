@@ -23,20 +23,23 @@ pub struct Envelope {
 /// not to wrap aggressively; the TUI will re-wrap visually anyway.
 const HTML_RENDER_WIDTH: usize = 120;
 
-/// Pick the cleanest plaintext rendering of the message body. Prefers an
-/// explicit text/plain MIME part. For HTML-only messages, passes the HTML
-/// through `html2text` rather than mail-parser's built-in fallback so that
-/// `<style>` / `<script>` content is dropped instead of bleeding through.
+/// Pick the cleanest plaintext rendering of the message body.
+///
+/// Prefers the HTML part rendered through `html2text` when one exists —
+/// many marketing senders (eBay, retailers) bundle raw CSS into their
+/// text/plain alternative so it's not really "plain", whereas html2text
+/// strips `<style>` / `<script>` cleanly. Falls back to the text/plain
+/// part only when there's no HTML alternative.
 pub fn render_body(msg: &Message<'_>) -> String {
-    if msg.text_body_count() > 0 {
-        if let Some(text) = msg.body_text(0) {
-            return text.into_owned();
-        }
-    }
     if msg.html_body_count() > 0 {
         if let Some(html) = msg.body_html(0) {
             return html2text::from_read(html.as_bytes(), HTML_RENDER_WIDTH)
                 .unwrap_or_else(|_| html.into_owned());
+        }
+    }
+    if msg.text_body_count() > 0 {
+        if let Some(text) = msg.body_text(0) {
+            return text.into_owned();
         }
     }
     String::new()
