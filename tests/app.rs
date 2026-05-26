@@ -181,6 +181,45 @@ fn cancel_chord_when_not_pending_is_noop() {
 }
 
 #[test]
+fn g_alone_pends_chord_and_returns_none() {
+    let mut app = App::new(3);
+    app.scroll = 10;
+    let act = app.handle(Input::Char('g'));
+    assert!(matches!(act, AppAction::None));
+    assert!(app.pending_g);
+    assert_eq!(app.scroll, 10, "scroll only resets on the second g");
+}
+
+#[test]
+fn gg_chord_scrolls_to_top() {
+    let mut app = App::new(3);
+    app.scroll = 42;
+    app.handle(Input::Char('g'));
+    let act = app.handle(Input::Char('g'));
+    assert!(matches!(act, AppAction::ScrollToTop));
+    assert_eq!(app.scroll, 0);
+    assert!(!app.pending_g);
+}
+
+#[test]
+fn capital_g_scrolls_to_bottom_using_max_scroll() {
+    let mut app = App::new(3);
+    app.max_scroll = 87;
+    let act = app.handle(Input::Char('G'));
+    assert!(matches!(act, AppAction::ScrollToBottom));
+    assert_eq!(app.scroll, 87);
+}
+
+#[test]
+fn g_followed_by_other_key_cancels_chord() {
+    let mut app = App::new(3);
+    app.handle(Input::Char('g'));
+    assert!(app.pending_g);
+    app.handle(Input::Char('z'));
+    assert!(!app.pending_g);
+}
+
+#[test]
 fn unrecognised_key_is_noop_and_clears_chord() {
     let mut app = App::new(3);
     app.handle(Input::Char('d'));

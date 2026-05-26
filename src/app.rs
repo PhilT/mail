@@ -32,6 +32,8 @@ pub enum AppAction {
     ScrollUp,
     ScrollDown,
     ToggleRemoteImages,
+    ScrollToTop,
+    ScrollToBottom,
 }
 
 #[derive(Debug, Clone)]
@@ -39,7 +41,10 @@ pub struct App {
     pub total: usize,
     pub current: usize,
     pub pending_d: bool,
+    pub pending_g: bool,
     pub scroll: u16,
+    /// Updated by the drawer each frame so `G` knows where the bottom is.
+    pub max_scroll: u16,
     pub show_remote: bool,
     pub n_archived: u32,
     pub n_deleted: u32,
@@ -53,7 +58,9 @@ impl App {
             total,
             current: 0,
             pending_d: false,
+            pending_g: false,
             scroll: 0,
+            max_scroll: 0,
             show_remote: false,
             n_archived: 0,
             n_deleted: 0,
@@ -67,9 +74,13 @@ impl App {
     }
 
     pub fn handle(&mut self, input: Input) -> AppAction {
-        // Any key other than another 'd' cancels a pending dd chord.
+        // Any key other than another 'd' cancels a pending dd chord;
+        // any key other than another 'g' cancels a pending gg chord.
         if self.pending_d && input != Input::Char('d') {
             self.pending_d = false;
+        }
+        if self.pending_g && input != Input::Char('g') {
+            self.pending_g = false;
         }
 
         match input {
@@ -91,6 +102,19 @@ impl App {
                 self.quit = true;
                 AppAction::Quit
             }
+            Input::Char('g') if self.pending_g => {
+                self.pending_g = false;
+                self.scroll = 0;
+                AppAction::ScrollToTop
+            }
+            Input::Char('g') => {
+                self.pending_g = true;
+                AppAction::None
+            }
+            Input::Char('G') => {
+                self.scroll = self.max_scroll;
+                AppAction::ScrollToBottom
+            }
             Input::Char('j') | Input::Down => {
                 self.scroll = self.scroll.saturating_add(1);
                 AppAction::ScrollDown
@@ -108,6 +132,7 @@ impl App {
     /// instead of waiting for the user to press a second key forever.
     pub fn cancel_chord(&mut self) {
         self.pending_d = false;
+        self.pending_g = false;
     }
 
     /// Called by the main loop after Archive/Delete/Skip is performed.
@@ -125,7 +150,9 @@ impl App {
             self.current += 1;
         }
         self.scroll = 0;
+        self.max_scroll = 0;
         self.pending_d = false;
+        self.pending_g = false;
         self.show_remote = false;
     }
 }

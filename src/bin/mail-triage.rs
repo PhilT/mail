@@ -93,6 +93,12 @@ fn run(
         let env = &envelopes[app.current];
         let loaded = load_message(&mut cache, app.current, env, &mut picker, app.show_remote);
 
+        // Compute max_scroll from the loaded runs at the current viewport
+        // width so `G` (jump-to-bottom) knows the floor. We don't have a
+        // Frame here, but the terminal size is enough.
+        let term_size = terminal.size()?;
+        app.max_scroll = compute_max_scroll(&loaded.runs, term_size.width, term_size.height);
+
         terminal.draw(|frame| draw(frame, env, loaded, app))?;
 
         let timeout = if app.pending_d { CHORD_TIMEOUT } else { IDLE_POLL };
@@ -133,7 +139,11 @@ fn run(
                 // hides) the remote images per the new show_remote flag.
                 cache = None;
             }
-            AppAction::None | AppAction::ScrollUp | AppAction::ScrollDown => {}
+            AppAction::None
+            | AppAction::ScrollUp
+            | AppAction::ScrollDown
+            | AppAction::ScrollToTop
+            | AppAction::ScrollToBottom => {}
         }
     }
     Ok(())
@@ -373,6 +383,23 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, runs: &[RenderedRun], scrol
         area,
         &mut bar_state,
     );
+}
+
+/// Estimate the max scroll offset for the body given the loaded runs and
+/// terminal dimensions. Matches the layout draw_body does: top 5 rows are
+/// header, bottom row is footer, body fills the middle, and one column on
+/// the right is reserved for the scrollbar.
+fn compute_max_scroll(runs: &[RenderedRun], term_w: u16, term_h: u16) -> u16 {
+    let body_h = term_h.saturating_sub(5 + 1);
+    let body_inner_w = term_w.saturating_sub(1).max(1) as usize;
+    let total: u16 = runs
+        .iter()
+        .map(|r| match r {
+            RenderedRun::Text(t) => wrap_lines(t, body_inner_w) as u16,
+            RenderedRun::Image { height, .. } => *height,
+        })
+        .fold(0u16, u16::saturating_add);
+    total.saturating_sub(body_h)
 }
 
 /// Cheap line-count estimator that matches what `Paragraph::wrap` does
