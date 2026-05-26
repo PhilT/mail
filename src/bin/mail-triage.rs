@@ -195,12 +195,21 @@ fn build_runs(
             BodyRun::Url(url) => {
                 has_remote = true;
                 if !show_remote {
-                    out.push(RenderedRun::Text(format!("[remote image: {url} — press 'r' to load]\n")));
+                    out.push(RenderedRun::Text(format!(
+                        "[remote image: {url} — press 'r' to load]\n"
+                    )));
                     continue;
                 }
-                match fetch_remote(&url).as_deref().and_then(|b| build_image_run(picker, Some(b))) {
-                    Some(run) => out.push(run),
-                    None => out.push(RenderedRun::Text(format!("[remote image failed: {url}]\n"))),
+                match fetch_remote(&url) {
+                    Ok(bytes) => match build_image_run(picker, Some(&bytes)) {
+                        Some(run) => out.push(run),
+                        None => out.push(RenderedRun::Text(format!(
+                            "[remote image decode failed: {url}]\n"
+                        ))),
+                    },
+                    Err(why) => out.push(RenderedRun::Text(format!(
+                        "[remote image failed ({why}): {url}]\n"
+                    ))),
                 }
             }
         }
@@ -208,16 +217,25 @@ fn build_runs(
     (out, has_remote)
 }
 
-fn fetch_remote(url: &str) -> Option<Vec<u8>> {
+/// Browser-flavored UA so tracking-pixel servers don't reject us. Lots of
+/// senders quietly 403 anything that looks like a script.
+const FETCH_UA: &str =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
+
+fn fetch_remote(url: &str) -> Result<Vec<u8>, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
+        .user_agent(FETCH_UA)
         .build()
-        .ok()?;
-    let resp = client.get(url).send().ok()?;
-    if !resp.status().is_success() {
-        return None;
+        .map_err(|e| format!("client: {e}"))?;
+    let resp = client.get(url).send().map_err(|e| format!("send: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {}", status.as_u16()));
     }
-    resp.bytes().ok().map(|b| b.to_vec())
+    resp.bytes()
+        .map(|b| b.to_vec())
+        .map_err(|e| format!("body: {e}"))
 }
 
 fn build_image_run(picker: &mut Picker, bytes: Option<&[u8]>) -> Option<RenderedRun> {
