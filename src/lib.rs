@@ -1,5 +1,7 @@
 //! Shared library for the `mail-*` binaries.
 
+pub mod app;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -10,8 +12,9 @@ pub use mail_parser::{Message, MessageParser};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Envelope {
     pub path: PathBuf,
-    pub date: i64,             // unix epoch from the Date header
-    pub from: String,          // already formatted, e.g. "Foo <foo@bar>"
+    pub date_epoch: i64,        // for sorting; i64::MAX when unparseable
+    pub date_display: String,   // pre-rendered, e.g. "2026-05-26T11:36+00:00"
+    pub from: String,           // pre-rendered, e.g. "Foo <foo@bar>"
     pub subject: String,
     pub has_attachment: bool,
 }
@@ -50,16 +53,18 @@ pub fn list_inbox(mailroot: &Path) -> anyhow::Result<Vec<Envelope>> {
                 Some(m) => m,
                 None => continue,
             };
+            let dt = msg.date();
             out.push(Envelope {
                 path: path.clone(),
-                date: msg.date().map(|d| d.to_timestamp()).unwrap_or(i64::MAX),
+                date_epoch: dt.map(|d| d.to_timestamp()).unwrap_or(i64::MAX),
+                date_display: dt.map(|d| d.to_rfc3339()).unwrap_or_default(),
                 from: format_first_addr(&msg),
                 subject: msg.subject().unwrap_or("").to_string(),
                 has_attachment: msg.attachment_count() > 0,
             });
         }
     }
-    out.sort_by_key(|e| e.date);
+    out.sort_by_key(|e| e.date_epoch);
     Ok(out)
 }
 
