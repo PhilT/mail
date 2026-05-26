@@ -144,6 +144,18 @@ fn s_toggles_show_remote_and_returns_toggle_action() {
 }
 
 #[test]
+fn show_remote_resets_to_off_when_advancing_to_next_message() {
+    let mut app = App::new(3);
+    app.handle(Input::Char('s'));
+    assert!(app.show_remote);
+    app.advance(AppAction::Skip);
+    assert!(
+        !app.show_remote,
+        "remote images should default off on every fresh message",
+    );
+}
+
+#[test]
 fn cancel_chord_clears_pending() {
     let mut app = App::new(3);
     app.handle(Input::Char('d'));

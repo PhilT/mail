@@ -126,5 +126,6 @@ impl App {
         }
         self.scroll = 0;
         self.pending_d = false;
+        self.show_remote = false;
     }
 }
