@@ -61,6 +61,45 @@ fn inject_cid_markers(html: &str) -> String {
     re.replace_all(html, "[[IMG:$1]]").into_owned()
 }
 
+/// A single segment of a rendered body: either a chunk of text or an
+/// inline-image reference (by Content-ID) that the TUI should paint with
+/// a `ratatui-image` widget at this position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyRun {
+    Text(String),
+    Image(String),
+}
+
+/// Parse a rendered body produced by [`render_body`] into a sequence of
+/// `BodyRun`s. Each `[[IMG:cid]]` marker becomes a [`BodyRun::Image`];
+/// surrounding text becomes [`BodyRun::Text`] runs. Empty text runs (e.g.
+/// between adjacent markers, or before/after a marker at the edge) are
+/// dropped so the caller can iterate without worrying about empty entries.
+pub fn split_body(body: &str) -> Vec<BodyRun> {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"\[\[IMG:([^\]]+)\]\]").unwrap());
+
+    let mut runs = Vec::new();
+    let mut last_end = 0;
+    for m in re.captures_iter(body) {
+        let full = m.get(0).unwrap();
+        let cid = m.get(1).unwrap().as_str();
+
+        let prefix = &body[last_end..full.start()];
+        if !prefix.is_empty() {
+            runs.push(BodyRun::Text(prefix.to_string()));
+        }
+        runs.push(BodyRun::Image(cid.to_string()));
+        last_end = full.end();
+    }
+    let tail = &body[last_end..];
+    if !tail.is_empty() {
+        runs.push(BodyRun::Text(tail.to_string()));
+    }
+    runs
+}
+
 /// Collect every `image/*` MIME part that carries a `Content-ID`, keyed by
 /// the bare CID (angle brackets stripped). The bytes are the decoded body
 /// of the part — ready to write to a tempfile and hand to a renderer.
