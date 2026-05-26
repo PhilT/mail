@@ -28,31 +28,13 @@ const HTML_RENDER_WIDTH: usize = 120;
 /// Return the message's explicit `text/plain` body part, or `None` if the
 /// message has only HTML. (mail-parser indexes the HTML part into
 /// `text_body` as a fallback, so we check the part's real subtype.)
-///
-/// Used by the rate experiment for A/B-comparing the two renderings.
-pub fn body_text_only(msg: &Message<'_>) -> Option<String> {
+fn body_text_only(msg: &Message<'_>) -> Option<String> {
     let part = msg.text_part(0)?;
     let sub = part.content_type()?.subtype()?;
     if !sub.eq_ignore_ascii_case("plain") {
         return None;
     }
     part.text_contents().map(|s| s.to_string())
-}
-
-/// Return the message's `text/html` body part rendered through html2text,
-/// or `None` if the message has no real HTML part. Same fallback caveat as
-/// [`body_text_only`] — checks the subtype, not just `html_body_count`.
-pub fn body_html_rendered(msg: &Message<'_>) -> Option<String> {
-    let part = msg.html_part(0)?;
-    let sub = part.content_type()?.subtype()?;
-    if !sub.eq_ignore_ascii_case("html") {
-        return None;
-    }
-    let html = part.text_contents()?;
-    Some(
-        html2text::from_read(html.as_bytes(), HTML_RENDER_WIDTH)
-            .unwrap_or_else(|_| html.to_string()),
-    )
 }
 
 /// Pick the cleanest plaintext rendering of the message body.
