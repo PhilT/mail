@@ -6,7 +6,7 @@
 //! single text run with no styling.
 
 use mail_parser::Message;
-use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -69,8 +69,20 @@ fn render_html(html: &str) -> Vec<BodyRun> {
         Err(_) => return vec![BodyRun::Text(plain_lines(html))],
     };
 
+    // Debug: if MAIL_TRIAGE_DUMP is set, dump the markdown intermediate to
+    // /tmp/mail-triage-last.md so we can inspect what html-to-markdown
+    // emitted for problem messages.
+    if std::env::var_os("MAIL_TRIAGE_DUMP").is_some() {
+        let _ = std::fs::write("/tmp/mail-triage-last.md", &md);
+        let _ = std::fs::write("/tmp/mail-triage-last.html", html);
+    }
+
     let mut builder = RunBuilder::default();
-    let parser = Parser::new(&md);
+    // Tables and strikethrough are common in HTML-derived markdown (the
+    // converter emits GFM tables for any <table>). Without ENABLE_TABLES,
+    // table content surfaces as raw text with `|` separators.
+    let parser_options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
+    let parser = Parser::new_ext(&md, parser_options);
     for event in parser {
         builder.handle(event);
     }
@@ -88,6 +100,11 @@ struct RunBuilder {
     link_urls: Vec<String>,
     in_image: u32,
     list_depth: u32,
+    table_depth: u32,
+    cell_count_in_row: u32,
+    /// Was the very last *emitted* event a horizontal rule? Used to
+    /// collapse runs of consecutive rules (common in template HTML).
+    last_emitted_was_rule: bool,
 }
 
 impl RunBuilder {
@@ -151,10 +168,16 @@ impl RunBuilder {
                 if !self.current_line.is_empty() {
                     self.end_line();
                 }
-                self.lines.push(Line::from(Span::styled(
-                    "─".repeat(40),
-                    Style::default().fg(Color::DarkGray),
-                )));
+                if !self.last_emitted_was_rule {
+                    self.lines.push(Line::from(Span::styled(
+                        "─".repeat(40),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    self.last_emitted_was_rule = true;
+                    return;
+                }
+                // Already had a rule — collapse consecutive ones.
+                return;
             }
 
             Event::Start(Tag::Paragraph) => {}
@@ -262,8 +285,52 @@ impl RunBuilder {
                 self.end_block();
             }
 
+            Event::Start(Tag::Table(_)) => {
+                self.table_depth += 1;
+                if self.table_depth == 1 {
+                    self.end_block();
+                }
+            }
+            Event::End(TagEnd::Table) => {
+                self.table_depth = self.table_depth.saturating_sub(1);
+                if self.table_depth == 0 {
+                    self.end_block();
+                }
+            }
+            Event::Start(Tag::TableHead) => {
+                self.cell_count_in_row = 0;
+                self.push_style(|s| s.add_modifier(Modifier::BOLD));
+            }
+            Event::End(TagEnd::TableHead) => {
+                self.pop_style();
+                if !self.current_line.is_empty() {
+                    self.end_line();
+                }
+            }
+            Event::Start(Tag::TableRow) => {
+                self.cell_count_in_row = 0;
+            }
+            Event::End(TagEnd::TableRow) => {
+                if !self.current_line.is_empty() {
+                    self.end_line();
+                }
+            }
+            Event::Start(Tag::TableCell) => {
+                if self.cell_count_in_row > 0 {
+                    self.current_line.push(Span::styled(
+                        " │ ",
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                self.cell_count_in_row += 1;
+            }
+            Event::End(TagEnd::TableCell) => {}
+
             _ => {}
         }
+        // Anything that wasn't a Rule resets the dedup latch.
+        // (The Rule branches above return early before this.)
+        self.last_emitted_was_rule = false;
     }
 
     fn finish(mut self) -> Vec<BodyRun> {
