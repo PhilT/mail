@@ -31,6 +31,7 @@ pub enum AppAction {
     Quit,
     ScrollUp,
     ScrollDown,
+    ToggleRemoteImages,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +40,7 @@ pub struct App {
     pub current: usize,
     pub pending_d: bool,
     pub scroll: u16,
+    pub show_remote: bool,
     pub n_archived: u32,
     pub n_deleted: u32,
     pub n_skipped: u32,
@@ -52,6 +54,7 @@ impl App {
             current: 0,
             pending_d: false,
             scroll: 0,
+            show_remote: false,
             n_archived: 0,
             n_deleted: 0,
             n_skipped: 0,
@@ -80,6 +83,10 @@ impl App {
                 AppAction::None
             }
             Input::Char(' ') => AppAction::Skip,
+            Input::Char('s') => {
+                self.show_remote = !self.show_remote;
+                AppAction::ToggleRemoteImages
+            }
             Input::Char('q') => {
                 self.quit = true;
                 AppAction::Quit

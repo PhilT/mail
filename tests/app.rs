@@ -133,6 +133,17 @@ fn advance_doesnt_overflow_past_total() {
 }
 
 #[test]
+fn s_toggles_show_remote_and_returns_toggle_action() {
+    let mut app = App::new(3);
+    assert!(!app.show_remote);
+    let act = app.handle(Input::Char('s'));
+    assert!(matches!(act, AppAction::ToggleRemoteImages));
+    assert!(app.show_remote);
+    app.handle(Input::Char('s'));
+    assert!(!app.show_remote);
+}
+
+#[test]
 fn cancel_chord_clears_pending() {
     let mut app = App::new(3);
     app.handle(Input::Char('d'));

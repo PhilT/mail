@@ -48,17 +48,22 @@ pub fn render_body(msg: &Message<'_>) -> String {
     String::new()
 }
 
-/// Replace every `<img ... src="cid:foo" ...>` with a `[[IMG:foo]]` marker
-/// so the TUI can locate inline-image positions in the rendered body.
-/// http(s)://… sources are left alone — those belong to Phase D.
+/// Replace every `<img ... src="cid:foo" ...>` with `[[IMG:foo]]` and every
+/// `<img ... src="https?://...">` with `[[URL:https://...]]`. The TUI uses
+/// the marker kind to decide whether to resolve from the message's
+/// inline-image map (cid) or fetch from the network (url).
 fn inject_cid_markers(html: &str) -> String {
     use std::sync::OnceLock;
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        // Lazy regex: <img ... src=("|')cid:CID("|') ... >
+    static CID: OnceLock<regex::Regex> = OnceLock::new();
+    static URL: OnceLock<regex::Regex> = OnceLock::new();
+    let cid_re = CID.get_or_init(|| {
         regex::Regex::new(r#"(?is)<img[^>]*\bsrc\s*=\s*["']cid:([^"']+)["'][^>]*>"#).unwrap()
     });
-    re.replace_all(html, "[[IMG:$1]]").into_owned()
+    let url_re = URL.get_or_init(|| {
+        regex::Regex::new(r#"(?is)<img[^>]*\bsrc\s*=\s*["'](https?://[^"']+)["'][^>]*>"#).unwrap()
+    });
+    let after_cid = cid_re.replace_all(html, "[[IMG:$1]]");
+    url_re.replace_all(&after_cid, "[[URL:$1]]").into_owned()
 }
 
 /// A single segment of a rendered body: either a chunk of text or an
@@ -67,7 +72,11 @@ fn inject_cid_markers(html: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BodyRun {
     Text(String),
+    /// Inline image referenced by Content-ID (cid:...).
     Image(String),
+    /// Remote image referenced by absolute http(s) URL. Fetched on demand
+    /// by the TUI when the user opts in.
+    Url(String),
 }
 
 /// Parse a rendered body produced by [`render_body`] into a sequence of
@@ -78,19 +87,26 @@ pub enum BodyRun {
 pub fn split_body(body: &str) -> Vec<BodyRun> {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| regex::Regex::new(r"\[\[IMG:([^\]]+)\]\]").unwrap());
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"\[\[(IMG|URL):([^\]]+)\]\]").unwrap()
+    });
 
     let mut runs = Vec::new();
     let mut last_end = 0;
     for m in re.captures_iter(body) {
         let full = m.get(0).unwrap();
-        let cid = m.get(1).unwrap().as_str();
+        let kind = m.get(1).unwrap().as_str();
+        let value = m.get(2).unwrap().as_str().to_string();
 
         let prefix = &body[last_end..full.start()];
         if !prefix.is_empty() {
             runs.push(BodyRun::Text(prefix.to_string()));
         }
-        runs.push(BodyRun::Image(cid.to_string()));
+        runs.push(match kind {
+            "IMG" => BodyRun::Image(value),
+            "URL" => BodyRun::Url(value),
+            _ => unreachable!("regex group restricts to IMG|URL"),
+        });
         last_end = full.end();
     }
     let tail = &body[last_end..];

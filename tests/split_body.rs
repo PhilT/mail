@@ -72,3 +72,31 @@ fn adjacent_markers_have_no_text_between() {
         vec![BodyRun::Image("a".into()), BodyRun::Image("b".into())],
     );
 }
+
+#[test]
+fn url_marker_becomes_url_run() {
+    let runs = mail::split_body("see [[URL:https://example.com/x.png]] here");
+    assert_eq!(
+        runs,
+        vec![
+            BodyRun::Text("see ".into()),
+            BodyRun::Url("https://example.com/x.png".into()),
+            BodyRun::Text(" here".into()),
+        ]
+    );
+}
+
+#[test]
+fn mixed_cid_and_url_markers_in_one_body() {
+    let runs = mail::split_body("a[[IMG:c1]]b[[URL:https://x.com/a.png]]c");
+    assert_eq!(
+        runs,
+        vec![
+            BodyRun::Text("a".into()),
+            BodyRun::Image("c1".into()),
+            BodyRun::Text("b".into()),
+            BodyRun::Url("https://x.com/a.png".into()),
+            BodyRun::Text("c".into()),
+        ]
+    );
+}

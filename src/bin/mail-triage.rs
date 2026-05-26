@@ -41,6 +41,7 @@ enum RenderedRun {
 
 struct LoadedMessage {
     index: usize,
+    show_remote: bool,
     runs: Vec<RenderedRun>,
 }
 
@@ -89,7 +90,7 @@ fn run(
 
     while !app.is_done() {
         let env = &envelopes[app.current];
-        let loaded = load_message(&mut cache, app.current, env, &mut picker);
+        let loaded = load_message(&mut cache, app.current, env, &mut picker, app.show_remote);
 
         terminal.draw(|frame| draw(frame, env, loaded, app))?;
 
@@ -126,6 +127,11 @@ fn run(
                 app.advance(action);
             }
             AppAction::Quit => break,
+            AppAction::ToggleRemoteImages => {
+                // Force the cache rebuild so the next draw fetches (or
+                // hides) the remote images per the new show_remote flag.
+                cache = None;
+            }
             AppAction::None | AppAction::ScrollUp | AppAction::ScrollDown => {}
         }
     }
@@ -137,19 +143,23 @@ fn load_message<'a>(
     idx: usize,
     env: &Envelope,
     picker: &mut Picker,
+    show_remote: bool,
 ) -> &'a LoadedMessage {
     if let Some(loaded) = cache.as_ref() {
-        if loaded.index == idx {
-            // Safe because we just checked: cache is Some.
+        if loaded.index == idx && loaded.show_remote == show_remote {
             return cache.as_ref().unwrap();
         }
     }
-    let runs = build_runs(env, picker);
-    *cache = Some(LoadedMessage { index: idx, runs });
+    let runs = build_runs(env, picker, show_remote);
+    *cache = Some(LoadedMessage {
+        index: idx,
+        show_remote,
+        runs,
+    });
     cache.as_ref().unwrap()
 }
 
-fn build_runs(env: &Envelope, picker: &mut Picker) -> Vec<RenderedRun> {
+fn build_runs(env: &Envelope, picker: &mut Picker, show_remote: bool) -> Vec<RenderedRun> {
     let Ok(msg) = mail::parse_file(&env.path) else {
         return vec![RenderedRun::Text("(body extraction failed)".into())];
     };
@@ -161,16 +171,38 @@ fn build_runs(env: &Envelope, picker: &mut Picker) -> Vec<RenderedRun> {
     for r in raw_runs {
         match r {
             BodyRun::Text(t) => out.push(RenderedRun::Text(t)),
-            BodyRun::Image(cid) => match build_image_run(picker, cids.get(&cid)) {
+            BodyRun::Image(cid) => match build_image_run(picker, cids.get(&cid).map(|v| v.as_slice())) {
                 Some(run) => out.push(run),
                 None => out.push(RenderedRun::Text(format!("[image: {cid} unavailable]\n"))),
             },
+            BodyRun::Url(url) => {
+                if !show_remote {
+                    out.push(RenderedRun::Text(format!("[remote image: {url} — press 's' to load]\n")));
+                    continue;
+                }
+                match fetch_remote(&url).as_deref().and_then(|b| build_image_run(picker, Some(b))) {
+                    Some(run) => out.push(run),
+                    None => out.push(RenderedRun::Text(format!("[remote image failed: {url}]\n"))),
+                }
+            }
         }
     }
     out
 }
 
-fn build_image_run(picker: &mut Picker, bytes: Option<&Vec<u8>>) -> Option<RenderedRun> {
+fn fetch_remote(url: &str) -> Option<Vec<u8>> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let resp = client.get(url).send().ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.bytes().ok().map(|b| b.to_vec())
+}
+
+fn build_image_run(picker: &mut Picker, bytes: Option<&[u8]>) -> Option<RenderedRun> {
     let bytes = bytes?;
     let dyn_img = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
@@ -226,9 +258,12 @@ fn draw(frame: &mut ratatui::Frame, env: &Envelope, loaded: &LoadedMessage, app:
 
     // Footer
     let footer = if app.pending_d {
-        "  press 'd' again to delete  ·  any other key cancels"
+        "  press 'd' again to delete  ·  any other key cancels".to_string()
     } else {
-        "  [x] archive   [dd] delete   [space] skip   [j/k] scroll   [q] quit"
+        let remote = if app.show_remote { "on" } else { "off" };
+        format!(
+            "  [x] archive  [dd] delete  [space] skip  [s] remote images: {remote}  [j/k] scroll  [q] quit"
+        )
     };
     frame.render_widget(Paragraph::new(footer), chunks[2]);
 }

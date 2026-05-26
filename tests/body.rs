@@ -130,12 +130,16 @@ fn no_marker_when_no_inline_images() {
 }
 
 #[test]
-fn remote_image_url_leaves_no_cid_marker() {
-    // Remote images are Phase D's problem; render_body should not emit a
-    // cid-style marker for an http(s) src.
+fn remote_image_url_emits_url_marker() {
     let msg = MessageParser::default().parse(HTML_WITH_REMOTE_IMG).unwrap();
     let body = mail::render_body(&msg);
-    assert!(!body.contains("[[IMG:"), "marker leaked: {body:?}");
+    assert!(
+        body.contains("[[URL:https://example.com/x.png]]"),
+        "missing URL marker: {body:?}",
+    );
+    // The cid: marker is for embedded images only — no URL should ever
+    // land in an IMG: marker.
+    assert!(!body.contains("[[IMG:"), "wrong marker for remote image: {body:?}");
 }
 
 #[test]
