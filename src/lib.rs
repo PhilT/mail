@@ -25,24 +25,59 @@ pub struct Envelope {
 /// not to wrap aggressively; the TUI will re-wrap visually anyway.
 const HTML_RENDER_WIDTH: usize = 120;
 
+/// Return the message's explicit `text/plain` body part, or `None` if the
+/// message has only HTML. (mail-parser indexes the HTML part into
+/// `text_body` as a fallback, so we check the part's real subtype.)
+///
+/// Used by the rate experiment for A/B-comparing the two renderings.
+pub fn body_text_only(msg: &Message<'_>) -> Option<String> {
+    let part = msg.text_part(0)?;
+    let sub = part.content_type()?.subtype()?;
+    if !sub.eq_ignore_ascii_case("plain") {
+        return None;
+    }
+    part.text_contents().map(|s| s.to_string())
+}
+
+/// Return the message's `text/html` body part rendered through html2text,
+/// or `None` if the message has no real HTML part. Same fallback caveat as
+/// [`body_text_only`] — checks the subtype, not just `html_body_count`.
+pub fn body_html_rendered(msg: &Message<'_>) -> Option<String> {
+    let part = msg.html_part(0)?;
+    let sub = part.content_type()?.subtype()?;
+    if !sub.eq_ignore_ascii_case("html") {
+        return None;
+    }
+    let html = part.text_contents()?;
+    Some(
+        html2text::from_read(html.as_bytes(), HTML_RENDER_WIDTH)
+            .unwrap_or_else(|_| html.to_string()),
+    )
+}
+
 /// Pick the cleanest plaintext rendering of the message body.
 ///
-/// Prefers the HTML part rendered through `html2text` when one exists —
-/// many marketing senders (eBay, retailers) bundle raw CSS into their
-/// text/plain alternative so it's not really "plain", whereas html2text
-/// strips `<style>` / `<script>` cleanly. Falls back to the text/plain
-/// part only when there's no HTML alternative.
+/// Prefers a real `text/plain` body part when the message has one — across
+/// the inbox that's almost always the better-formatted version. Falls back
+/// to running the `text/html` part through `html2text` when there's no
+/// text alternative (eBay-style marketing mail and other HTML-only
+/// senders). For the HTML path we also inject `[[IMG:cid]]` / `[[URL:url]]`
+/// markers so the TUI can place inline images at their positions.
 pub fn render_body(msg: &Message<'_>) -> String {
-    if msg.html_body_count() > 0 {
-        if let Some(html) = msg.body_html(0) {
-            let with_markers = inject_cid_markers(&html);
-            return html2text::from_read(with_markers.as_bytes(), HTML_RENDER_WIDTH)
-                .unwrap_or(with_markers);
-        }
+    if let Some(text) = body_text_only(msg) {
+        return text;
     }
-    if msg.text_body_count() > 0 {
-        if let Some(text) = msg.body_text(0) {
-            return text.into_owned();
+    if let Some(part) = msg.html_part(0) {
+        if part
+            .content_type()
+            .and_then(|c| c.subtype())
+            .is_some_and(|s| s.eq_ignore_ascii_case("html"))
+        {
+            if let Some(html) = part.text_contents() {
+                let with_markers = inject_cid_markers(html);
+                return html2text::from_read(with_markers.as_bytes(), HTML_RENDER_WIDTH)
+                    .unwrap_or(with_markers);
+            }
         }
     }
     String::new()

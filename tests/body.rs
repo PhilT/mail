@@ -20,22 +20,22 @@ Content-Type: text/html; charset=utf-8\r\n\
 <script>alert('hi');</script>\
 </head><body><p>Hello html body.</p></body></html>\r\n";
 
-/// Marketing senders (eBay etc.) put raw CSS into their text/plain
-/// alternative. The HTML version is cleaner once run through html2text,
-/// so we prefer HTML when both exist.
-const MULTIPART_BOTH: &[u8] = b"From: a@b.com\r\n\
+/// Most senders ship a well-formed text/plain alongside an HTML version;
+/// the plain version is generally cleaner output.
+const MULTIPART_CLEAN: &[u8] = b"From: a@b.com\r\n\
 Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
 Content-Type: multipart/alternative; boundary=\"BOUND\"\r\n\
 \r\n\
 --BOUND\r\n\
 Content-Type: text/plain; charset=utf-8\r\n\
 \r\n\
-.foo { color: red; } Plain text mixed with raw CSS noise.\r\n\
+Hello,\r\n\r\nThis is a normal plaintext message with no CSS rules.\r\nCheers.\r\n\
 --BOUND\r\n\
 Content-Type: text/html; charset=utf-8\r\n\
 \r\n\
-<html><body><p>Clean HTML version.</p></body></html>\r\n\
+<html><body><p>HTML version, should not be used.</p></body></html>\r\n\
 --BOUND--\r\n";
+
 
 #[test]
 fn plaintext_only_is_surfaced_verbatim() {
@@ -142,10 +142,56 @@ fn remote_image_url_emits_url_marker() {
     assert!(!body.contains("[[IMG:"), "wrong marker for remote image: {body:?}");
 }
 
+/// Marketing mail typically uses tables for layout. html2text renders
+/// multi-cell rows side-by-side, which breaks substring markers spanning
+/// multiple lines (each cell's `[[URL:...]]` ends up interleaved with
+/// other cells' content). Make sure both URLs come through as distinct
+/// runs without bleed.
+const TABLE_WITH_TWO_IMG_URLS: &[u8] = b"From: a@b.com\r\n\
+Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
+Content-Type: text/html\r\n\
+\r\n\
+<html><body><table><tr>\
+<td><img src=\"https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png\"></td>\
+<td><img src=\"https://example.com/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png\"></td>\
+</tr></table></body></html>\r\n";
+
 #[test]
-fn multipart_prefers_html2text_rendered_html_over_noisy_plaintext() {
-    let msg = MessageParser::default().parse(MULTIPART_BOTH).unwrap();
+#[ignore = "html2text interleaves table cells, breaking substring markers; fix pending in Phase G"]
+fn table_layout_with_multiple_remote_imgs_yields_distinct_url_runs() {
+    let msg = MessageParser::default()
+        .parse(TABLE_WITH_TWO_IMG_URLS)
+        .unwrap();
+    let body = mail::render_body(&msg);
+    let runs = mail::split_body(&body);
+    let urls: Vec<&str> = runs
+        .iter()
+        .filter_map(|r| match r {
+            mail::BodyRun::Url(u) => Some(u.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        urls,
+        vec![
+            "https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+            "https://example.com/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png",
+        ],
+        "wanted two clean URL runs; body: {body:?}",
+    );
+    // And no literal marker text should leak into Text runs.
+    for run in &runs {
+        if let mail::BodyRun::Text(t) = run {
+            assert!(!t.contains("[[URL:"), "marker leaked into text: {t:?}");
+            assert!(!t.contains("[[IMG:"), "marker leaked into text: {t:?}");
+        }
+    }
+}
+
+#[test]
+fn multipart_prefers_real_plaintext_over_html() {
+    let msg = MessageParser::default().parse(MULTIPART_CLEAN).unwrap();
     let out = mail::render_body(&msg);
-    assert!(out.contains("Clean HTML version."), "got: {out:?}");
-    assert!(!out.contains(".foo"), "noisy plain leaked through: {out:?}");
+    assert!(out.contains("normal plaintext message"), "got: {out:?}");
+    assert!(!out.contains("HTML version"), "html leaked: {out:?}");
 }
