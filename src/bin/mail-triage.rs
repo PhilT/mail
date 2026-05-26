@@ -11,6 +11,7 @@
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
@@ -60,12 +61,27 @@ fn run(
     mailroot: &PathBuf,
 ) -> Result<()> {
     let mut cache: Option<(usize, String)> = None;
+    const CHORD_TIMEOUT: Duration = Duration::from_secs(5);
+    // Idle poll just long enough to keep the UI responsive without burning
+    // CPU. When a dd chord is pending, drop to CHORD_TIMEOUT so it expires
+    // even if the user wanders off.
+    const IDLE_POLL: Duration = Duration::from_secs(3600);
 
     while !app.is_done() {
         let env = &envelopes[app.current];
         let body = load_body(&mut cache, app.current, env);
 
         terminal.draw(|frame| draw(frame, env, &body, app))?;
+
+        let timeout = if app.pending_d { CHORD_TIMEOUT } else { IDLE_POLL };
+        if !event::poll(timeout)? {
+            // No key within the deadline. If we were waiting for the second
+            // 'd', cancel the chord and redraw.
+            if app.pending_d {
+                app.cancel_chord();
+            }
+            continue;
+        }
 
         let Event::Key(key) = event::read()? else {
             continue;
@@ -105,9 +121,8 @@ fn load_body(cache: &mut Option<(usize, String)>, idx: usize, env: &Envelope) ->
         }
     }
     let body = mail::parse_file(&env.path)
-        .ok()
-        .and_then(|m| m.body_text(0).map(|s| s.into_owned()))
-        .unwrap_or_else(|| "(body extraction failed)".to_string());
+        .map(|m| mail::render_body(&m))
+        .unwrap_or_else(|_| "(body extraction failed)".to_string());
     *cache = Some((idx, body.clone()));
     body
 }

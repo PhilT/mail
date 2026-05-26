@@ -133,6 +133,23 @@ fn advance_doesnt_overflow_past_total() {
 }
 
 #[test]
+fn cancel_chord_clears_pending() {
+    let mut app = App::new(3);
+    app.handle(Input::Char('d'));
+    assert!(app.pending_d);
+    app.cancel_chord();
+    assert!(!app.pending_d);
+}
+
+#[test]
+fn cancel_chord_when_not_pending_is_noop() {
+    let mut app = App::new(3);
+    app.cancel_chord();
+    assert!(!app.pending_d);
+    assert_eq!(app.current, 0);
+}
+
+#[test]
 fn unrecognised_key_is_noop_and_clears_chord() {
     let mut app = App::new(3);
     app.handle(Input::Char('d'));

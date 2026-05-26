@@ -96,6 +96,13 @@ impl App {
         }
     }
 
+    /// Cancel any pending dd chord. The main loop calls this when its
+    /// `event::poll` times out — letting half-pressed chords expire
+    /// instead of waiting for the user to press a second key forever.
+    pub fn cancel_chord(&mut self) {
+        self.pending_d = false;
+    }
+
     /// Called by the main loop after Archive/Delete/Skip is performed.
     /// Increments the matching counter, resets per-message UI state, and
     /// moves to the next message (saturating at `total` so accidental
