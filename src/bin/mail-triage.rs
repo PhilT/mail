@@ -1,30 +1,48 @@
 //! Triage every unactioned message in INBOX one at a time.
 //!
 //! Render-and-block: each iteration draws the current message (fixed header,
-//! scrollable body with scrollbar, fixed footer of actions), reads one key,
-//! routes it through `mail::app::App`, then performs the requested file
-//! move via `mail::archive` / `mail::delete` and advances.
+//! scrollable body with inline images and a scrollbar, fixed footer of
+//! actions), reads one key, routes it through `mail::app::App`, then
+//! performs the requested file move via `mail::archive` / `mail::delete`
+//! and advances.
 //!
 //! Defaults to `/data/mail/namecheap` as the mailroot; override with
 //! `MAILROOT=/path mail-triage`.
 
 use std::env;
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use image::ImageReader;
 use mail::app::{App, AppAction, Input};
-use mail::Envelope;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::text::{Line, Span};
+use mail::{BodyRun, Envelope};
+use ratatui::layout::{Constraint, Direction, Layout, Rect, Size as LayoutSize};
+use ratatui::text::Line;
 use ratatui::widgets::{
     Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
 use ratatui::DefaultTerminal;
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::Protocol;
+use ratatui_image::{Image, Resize};
 
 const DEFAULT_MAILROOT: &str = "/data/mail/namecheap";
+
+/// One rendered slice of a message body: either a text chunk or an
+/// inline image already encoded for the active terminal.
+enum RenderedRun {
+    Text(String),
+    Image { protocol: Protocol, height: u16 },
+}
+
+struct LoadedMessage {
+    index: usize,
+    runs: Vec<RenderedRun>,
+}
 
 fn main() -> Result<()> {
     let mailroot: PathBuf = env::var_os("MAILROOT")
@@ -39,7 +57,11 @@ fn main() -> Result<()> {
 
     let mut app = App::new(envelopes.len());
     let terminal = ratatui::init();
-    let result = run(terminal, &mut app, &envelopes, &mailroot);
+    // Picker queries the terminal for protocol + font size. If that fails
+    // (non-tty, weird terminal) fall back to unicode halfblocks at a sane
+    // pixel ratio so the app still works, just with chunkier images.
+    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    let result = run(terminal, &mut app, &envelopes, &mailroot, picker);
     ratatui::restore();
     result?;
 
@@ -59,24 +81,20 @@ fn run(
     app: &mut App,
     envelopes: &[Envelope],
     mailroot: &PathBuf,
+    mut picker: Picker,
 ) -> Result<()> {
-    let mut cache: Option<(usize, String)> = None;
+    let mut cache: Option<LoadedMessage> = None;
     const CHORD_TIMEOUT: Duration = Duration::from_secs(5);
-    // Idle poll just long enough to keep the UI responsive without burning
-    // CPU. When a dd chord is pending, drop to CHORD_TIMEOUT so it expires
-    // even if the user wanders off.
     const IDLE_POLL: Duration = Duration::from_secs(3600);
 
     while !app.is_done() {
         let env = &envelopes[app.current];
-        let body = load_body(&mut cache, app.current, env);
+        let loaded = load_message(&mut cache, app.current, env, &mut picker);
 
-        terminal.draw(|frame| draw(frame, env, &body, app))?;
+        terminal.draw(|frame| draw(frame, env, loaded, app))?;
 
         let timeout = if app.pending_d { CHORD_TIMEOUT } else { IDLE_POLL };
         if !event::poll(timeout)? {
-            // No key within the deadline. If we were waiting for the second
-            // 'd', cancel the chord and redraw.
             if app.pending_d {
                 app.cancel_chord();
             }
@@ -114,17 +132,62 @@ fn run(
     Ok(())
 }
 
-fn load_body(cache: &mut Option<(usize, String)>, idx: usize, env: &Envelope) -> String {
-    if let Some((i, body)) = cache.as_ref() {
-        if *i == idx {
-            return body.clone();
+fn load_message<'a>(
+    cache: &'a mut Option<LoadedMessage>,
+    idx: usize,
+    env: &Envelope,
+    picker: &mut Picker,
+) -> &'a LoadedMessage {
+    if let Some(loaded) = cache.as_ref() {
+        if loaded.index == idx {
+            // Safe because we just checked: cache is Some.
+            return cache.as_ref().unwrap();
         }
     }
-    let body = mail::parse_file(&env.path)
-        .map(|m| mail::render_body(&m))
-        .unwrap_or_else(|_| "(body extraction failed)".to_string());
-    *cache = Some((idx, body.clone()));
-    body
+    let runs = build_runs(env, picker);
+    *cache = Some(LoadedMessage { index: idx, runs });
+    cache.as_ref().unwrap()
+}
+
+fn build_runs(env: &Envelope, picker: &mut Picker) -> Vec<RenderedRun> {
+    let Ok(msg) = mail::parse_file(&env.path) else {
+        return vec![RenderedRun::Text("(body extraction failed)".into())];
+    };
+    let body = mail::render_body(&msg);
+    let cids = mail::inline_images(&msg);
+    let raw_runs = mail::split_body(&body);
+
+    let mut out = Vec::with_capacity(raw_runs.len());
+    for r in raw_runs {
+        match r {
+            BodyRun::Text(t) => out.push(RenderedRun::Text(t)),
+            BodyRun::Image(cid) => match build_image_run(picker, cids.get(&cid)) {
+                Some(run) => out.push(run),
+                None => out.push(RenderedRun::Text(format!("[image: {cid} unavailable]\n"))),
+            },
+        }
+    }
+    out
+}
+
+fn build_image_run(picker: &mut Picker, bytes: Option<&Vec<u8>>) -> Option<RenderedRun> {
+    let bytes = bytes?;
+    let dyn_img = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+
+    let font = picker.font_size();
+    let nat_w = dyn_img.width().div_ceil(font.width as u32) as u16;
+    let nat_h = dyn_img.height().div_ceil(font.height as u32) as u16;
+    // Cap so images don't overflow the body — body width varies but 60 cols
+    // is a reasonable upper bound and Resize::Fit will scale aspect.
+    let target = LayoutSize::new(nat_w.min(60).max(1), nat_h.max(1));
+
+    let protocol = picker.new_protocol(dyn_img, target, Resize::Fit(None)).ok()?;
+    let height = protocol.size().height;
+    Some(RenderedRun::Image { protocol, height })
 }
 
 fn map_key(key: KeyEvent) -> Option<Input> {
@@ -136,13 +199,13 @@ fn map_key(key: KeyEvent) -> Option<Input> {
     }
 }
 
-fn draw(frame: &mut ratatui::Frame, env: &Envelope, body: &str, app: &App) {
+fn draw(frame: &mut ratatui::Frame, env: &Envelope, loaded: &LoadedMessage, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5), // header
-            Constraint::Min(0),    // body
-            Constraint::Length(1), // footer
+            Constraint::Length(5),
+            Constraint::Min(0),
+            Constraint::Length(1),
         ])
         .split(frame.area());
 
@@ -159,41 +222,123 @@ fn draw(frame: &mut ratatui::Frame, env: &Envelope, body: &str, app: &App) {
     );
 
     // Body
-    let body_area = chunks[1];
-    let body_widget = Paragraph::new(body.to_owned())
-        .wrap(Wrap { trim: false })
-        .scroll((app.scroll, 0));
-    frame.render_widget(body_widget, body_area);
-
-    // Scrollbar — estimate content length from wrapped line count.
-    let usable_width = body_area.width.saturating_sub(1) as usize;
-    let approx_lines: usize = body
-        .lines()
-        .map(|l| {
-            if usable_width == 0 {
-                1
-            } else {
-                (l.chars().count().max(1) + usable_width - 1) / usable_width
-            }
-        })
-        .sum();
-    let viewport = body_area.height as usize;
-    let max_scroll = approx_lines.saturating_sub(viewport);
-    let mut scrollbar_state = ScrollbarState::new(max_scroll).position(app.scroll as usize);
-    frame.render_stateful_widget(
-        Scrollbar::new(ScrollbarOrientation::VerticalRight),
-        body_area,
-        &mut scrollbar_state,
-    );
+    draw_body(frame, chunks[1], &loaded.runs, app.scroll);
 
     // Footer
-    let footer_text = if app.pending_d {
-        Span::raw("  press 'd' again to delete  ·  any other key cancels")
+    let footer = if app.pending_d {
+        "  press 'd' again to delete  ·  any other key cancels"
     } else {
-        Span::raw(
-            "  [x] archive   [dd] delete   [space] skip   [j/k] scroll   [q] quit",
-        )
+        "  [x] archive   [dd] delete   [space] skip   [j/k] scroll   [q] quit"
     };
-    frame.render_widget(Paragraph::new(Line::from(footer_text)), chunks[2]);
+    frame.render_widget(Paragraph::new(footer), chunks[2]);
 }
 
+fn draw_body(frame: &mut ratatui::Frame, area: Rect, runs: &[RenderedRun], scroll: u16) {
+    if area.height == 0 {
+        return;
+    }
+    // Leave one column on the right for the scrollbar.
+    let inner = Rect {
+        width: area.width.saturating_sub(1),
+        ..area
+    };
+
+    // Compute height in cells for each run at the current viewport width.
+    let widths_for_wrap = inner.width.max(1) as usize;
+    let heights: Vec<u16> = runs
+        .iter()
+        .map(|r| match r {
+            RenderedRun::Text(t) => wrap_lines(t, widths_for_wrap) as u16,
+            RenderedRun::Image { height, .. } => *height,
+        })
+        .collect();
+    let total_height: u16 = heights.iter().copied().fold(0, u16::saturating_add);
+
+    // Find the topmost run and how many of its leading cells to skip.
+    let mut acc = 0u16;
+    let mut start_run = 0usize;
+    let mut skip_in_run = 0u16;
+    for (i, h) in heights.iter().enumerate() {
+        if acc + h > scroll {
+            start_run = i;
+            skip_in_run = scroll - acc;
+            break;
+        }
+        acc += h;
+        // If we exhaust runs (scrolled past), start_run stays at end.
+        start_run = i + 1;
+    }
+
+    // Walk runs from start_run, painting until we run out of viewport.
+    let mut y = 0u16;
+    for (i, run) in runs.iter().enumerate().skip(start_run) {
+        if y >= inner.height {
+            break;
+        }
+        let run_height = heights[i];
+        let visible = if i == start_run {
+            run_height.saturating_sub(skip_in_run)
+        } else {
+            run_height
+        };
+        let take = visible.min(inner.height - y);
+        if take == 0 {
+            continue;
+        }
+        let rect = Rect {
+            x: inner.x,
+            y: inner.y + y,
+            width: inner.width,
+            height: take,
+        };
+
+        match run {
+            RenderedRun::Text(t) => {
+                let scroll_offset = if i == start_run { skip_in_run } else { 0 };
+                let para = Paragraph::new(t.as_str())
+                    .wrap(Wrap { trim: false })
+                    .scroll((scroll_offset, 0));
+                frame.render_widget(para, rect);
+            }
+            RenderedRun::Image { protocol, height } => {
+                // Per agreed scroll model: skip an image if it would be
+                // clipped at the top (started above viewport) or the bottom
+                // (doesn't fully fit).
+                let clipped_top = i == start_run && skip_in_run > 0;
+                let clipped_bottom = take < *height;
+                if !clipped_top && !clipped_bottom {
+                    frame.render_widget(Image::new(protocol), rect);
+                }
+            }
+        }
+        y += take;
+    }
+
+    // Scrollbar
+    let max_scroll = total_height.saturating_sub(inner.height);
+    let mut bar_state = ScrollbarState::new(max_scroll as usize).position(scroll as usize);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight),
+        area,
+        &mut bar_state,
+    );
+}
+
+/// Cheap line-count estimator that matches what `Paragraph::wrap` does
+/// closely enough for scroll arithmetic. Counts blank lines as one row.
+fn wrap_lines(text: &str, width: usize) -> usize {
+    if width == 0 {
+        return text.lines().count().max(1);
+    }
+    text.lines()
+        .map(|l| {
+            let n = l.chars().count();
+            if n == 0 {
+                1
+            } else {
+                (n + width - 1) / width
+            }
+        })
+        .sum::<usize>()
+        .max(1)
+}
