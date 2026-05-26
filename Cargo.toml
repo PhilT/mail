@@ -1,0 +1,17 @@
+[package]
+name = "mail"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "mail"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mail-triage"
+path = "src/bin/mail-triage.rs"
+
+[dependencies]
+anyhow = "1"
+mail-parser = "0.11"
