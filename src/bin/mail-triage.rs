@@ -42,6 +42,7 @@ enum RenderedRun {
 struct LoadedMessage {
     index: usize,
     show_remote: bool,
+    has_remote: bool,
     runs: Vec<RenderedRun>,
 }
 
@@ -150,24 +151,30 @@ fn load_message<'a>(
             return cache.as_ref().unwrap();
         }
     }
-    let runs = build_runs(env, picker, show_remote);
+    let (runs, has_remote) = build_runs(env, picker, show_remote);
     *cache = Some(LoadedMessage {
         index: idx,
         show_remote,
+        has_remote,
         runs,
     });
     cache.as_ref().unwrap()
 }
 
-fn build_runs(env: &Envelope, picker: &mut Picker, show_remote: bool) -> Vec<RenderedRun> {
+fn build_runs(
+    env: &Envelope,
+    picker: &mut Picker,
+    show_remote: bool,
+) -> (Vec<RenderedRun>, bool) {
     let Ok(msg) = mail::parse_file(&env.path) else {
-        return vec![RenderedRun::Text("(body extraction failed)".into())];
+        return (vec![RenderedRun::Text("(body extraction failed)".into())], false);
     };
     let body = mail::render_body(&msg);
     let cids = mail::inline_images(&msg);
     let raw_runs = mail::split_body(&body);
 
     let mut out = Vec::with_capacity(raw_runs.len());
+    let mut has_remote = false;
     for r in raw_runs {
         match r {
             BodyRun::Text(t) => out.push(RenderedRun::Text(t)),
@@ -176,8 +183,9 @@ fn build_runs(env: &Envelope, picker: &mut Picker, show_remote: bool) -> Vec<Ren
                 None => out.push(RenderedRun::Text(format!("[image: {cid} unavailable]\n"))),
             },
             BodyRun::Url(url) => {
+                has_remote = true;
                 if !show_remote {
-                    out.push(RenderedRun::Text(format!("[remote image: {url} — press 's' to load]\n")));
+                    out.push(RenderedRun::Text(format!("[remote image: {url} — press 'r' to load]\n")));
                     continue;
                 }
                 match fetch_remote(&url).as_deref().and_then(|b| build_image_run(picker, Some(b))) {
@@ -187,7 +195,7 @@ fn build_runs(env: &Envelope, picker: &mut Picker, show_remote: bool) -> Vec<Ren
             }
         }
     }
-    out
+    (out, has_remote)
 }
 
 fn fetch_remote(url: &str) -> Option<Vec<u8>> {
@@ -260,10 +268,18 @@ fn draw(frame: &mut ratatui::Frame, env: &Envelope, loaded: &LoadedMessage, app:
     let footer = if app.pending_d {
         "  press 'd' again to delete  ·  any other key cancels".to_string()
     } else {
-        let remote = if app.show_remote { "on" } else { "off" };
-        format!(
-            "  [x] archive  [dd] delete  [space] skip  [s] remote images: {remote}  [j/k] scroll  [q] quit"
-        )
+        let mut parts = vec![
+            "[x] archive".to_string(),
+            "[dd] delete".to_string(),
+            "[space] skip".to_string(),
+        ];
+        if loaded.has_remote {
+            let state = if app.show_remote { "on" } else { "off" };
+            parts.push(format!("[r] images: {state}"));
+        }
+        parts.push("[j/k] scroll".to_string());
+        parts.push("[q] quit".to_string());
+        format!("  {}", parts.join("  "))
     };
     frame.render_widget(Paragraph::new(footer), chunks[2]);
 }

@@ -83,7 +83,7 @@ impl App {
                 AppAction::None
             }
             Input::Char(' ') => AppAction::Skip,
-            Input::Char('s') => {
+            Input::Char('r') => {
                 self.show_remote = !self.show_remote;
                 AppAction::ToggleRemoteImages
             }

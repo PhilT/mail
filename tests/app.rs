@@ -133,26 +133,34 @@ fn advance_doesnt_overflow_past_total() {
 }
 
 #[test]
-fn s_toggles_show_remote_and_returns_toggle_action() {
+fn r_toggles_show_remote_and_returns_toggle_action() {
     let mut app = App::new(3);
     assert!(!app.show_remote);
-    let act = app.handle(Input::Char('s'));
+    let act = app.handle(Input::Char('r'));
     assert!(matches!(act, AppAction::ToggleRemoteImages));
     assert!(app.show_remote);
-    app.handle(Input::Char('s'));
+    app.handle(Input::Char('r'));
     assert!(!app.show_remote);
 }
 
 #[test]
 fn show_remote_resets_to_off_when_advancing_to_next_message() {
     let mut app = App::new(3);
-    app.handle(Input::Char('s'));
+    app.handle(Input::Char('r'));
     assert!(app.show_remote);
     app.advance(AppAction::Skip);
     assert!(
         !app.show_remote,
         "remote images should default off on every fresh message",
     );
+}
+
+#[test]
+fn s_no_longer_toggles_remote() {
+    let mut app = App::new(3);
+    let act = app.handle(Input::Char('s'));
+    assert!(matches!(act, AppAction::None));
+    assert!(!app.show_remote);
 }
 
 #[test]
