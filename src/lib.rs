@@ -2,10 +2,12 @@
 
 pub mod app;
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub use mail_parser::{Message, MessageParser};
+use mail_parser::MimeHeaders;
 
 /// A lightweight summary of a Maildir message — enough to populate a list
 /// view without having to keep the full parsed message in memory.
@@ -43,6 +45,25 @@ pub fn render_body(msg: &Message<'_>) -> String {
         }
     }
     String::new()
+}
+
+/// Collect every `image/*` MIME part that carries a `Content-ID`, keyed by
+/// the bare CID (angle brackets stripped). The bytes are the decoded body
+/// of the part — ready to write to a tempfile and hand to a renderer.
+///
+/// Used to resolve `<img src="cid:foo">` references in HTML bodies.
+pub fn inline_images(msg: &Message<'_>) -> HashMap<String, Vec<u8>> {
+    let mut out = HashMap::new();
+    for part in msg.parts.iter() {
+        let Some(ctype) = part.content_type() else { continue };
+        if !ctype.ctype().eq_ignore_ascii_case("image") {
+            continue;
+        }
+        let Some(cid) = part.content_id() else { continue };
+        let cid = cid.trim_start_matches('<').trim_end_matches('>').to_string();
+        out.insert(cid, part.contents().to_vec());
+    }
+    out
 }
 
 /// Read and parse a Maildir message file. The returned `Message` owns its
