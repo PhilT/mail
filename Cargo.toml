@@ -15,12 +15,12 @@ path = "src/bin/mail-triage.rs"
 [dependencies]
 anyhow = "1"
 crossterm = "0.29"
-html2text = "0.17"
+html-to-markdown-rs = "3"
 mail-parser = "0.11"
+pulldown-cmark = { version = "0.13", default-features = false }
 ratatui = "0.30"
 ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults"] }
 image = "0.25"
-regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 [dev-dependencies]

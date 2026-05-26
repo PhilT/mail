@@ -32,10 +32,10 @@ use ratatui_image::{Image, Resize};
 
 const DEFAULT_MAILROOT: &str = "/data/mail/namecheap";
 
-/// One rendered slice of a message body: either a text chunk or an
-/// inline image already encoded for the active terminal.
+/// One rendered slice of a message body: either pre-styled text lines or
+/// an inline image already encoded for the active terminal.
 enum RenderedRun {
-    Text(String),
+    Text(Vec<ratatui::text::Line<'static>>),
     Image { protocol: Protocol, height: u16 },
 }
 
@@ -177,44 +177,54 @@ fn build_runs(
     show_remote: bool,
 ) -> (Vec<RenderedRun>, bool) {
     let Ok(msg) = mail::parse_file(&env.path) else {
-        return (vec![RenderedRun::Text("(body extraction failed)".into())], false);
+        return (
+            vec![RenderedRun::Text(plain_line("(body extraction failed)"))],
+            false,
+        );
     };
-    let body = mail::render_body(&msg);
+    let raw_runs = mail::render_body(&msg);
     let cids = mail::inline_images(&msg);
-    let raw_runs = mail::split_body(&body);
 
     let mut out = Vec::with_capacity(raw_runs.len());
     let mut has_remote = false;
     for r in raw_runs {
         match r {
-            BodyRun::Text(t) => out.push(RenderedRun::Text(t)),
-            BodyRun::Image(cid) => match build_image_run(picker, cids.get(&cid).map(|v| v.as_slice())) {
-                Some(run) => out.push(run),
-                None => out.push(RenderedRun::Text(format!("[image: {cid} unavailable]\n"))),
-            },
+            BodyRun::Text(lines) => out.push(RenderedRun::Text(lines)),
+            BodyRun::Image(cid) => {
+                match build_image_run(picker, cids.get(&cid).map(|v| v.as_slice())) {
+                    Some(run) => out.push(run),
+                    None => out.push(RenderedRun::Text(plain_line(&format!(
+                        "[image: {cid} unavailable]"
+                    )))),
+                }
+            }
             BodyRun::Url(url) => {
                 has_remote = true;
                 if !show_remote {
-                    out.push(RenderedRun::Text(format!(
-                        "[remote image: {url} — press 'r' to load]\n"
-                    )));
+                    out.push(RenderedRun::Text(plain_line(&format!(
+                        "[remote image: {url} — press 'r' to load]"
+                    ))));
                     continue;
                 }
                 match fetch_remote(&url) {
                     Ok(bytes) => match build_image_run(picker, Some(&bytes)) {
                         Some(run) => out.push(run),
-                        None => out.push(RenderedRun::Text(format!(
-                            "[remote image decode failed: {url}]\n"
-                        ))),
+                        None => out.push(RenderedRun::Text(plain_line(&format!(
+                            "[remote image decode failed: {url}]"
+                        )))),
                     },
-                    Err(why) => out.push(RenderedRun::Text(format!(
-                        "[remote image failed ({why}): {url}]\n"
-                    ))),
+                    Err(why) => out.push(RenderedRun::Text(plain_line(&format!(
+                        "[remote image failed ({why}): {url}]"
+                    )))),
                 }
             }
         }
     }
     (out, has_remote)
+}
+
+fn plain_line(s: &str) -> Vec<ratatui::text::Line<'static>> {
+    vec![ratatui::text::Line::from(s.to_string())]
 }
 
 /// Browser-flavored UA so tracking-pixel servers don't reject us. Lots of
@@ -327,7 +337,7 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, runs: &[RenderedRun], scrol
     let heights: Vec<u16> = runs
         .iter()
         .map(|r| match r {
-            RenderedRun::Text(t) => wrap_lines(t, widths_for_wrap) as u16,
+            RenderedRun::Text(lines) => wrap_lines_for(lines, widths_for_wrap) as u16,
             RenderedRun::Image { height, .. } => *height,
         })
         .collect();
@@ -372,9 +382,9 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, runs: &[RenderedRun], scrol
         };
 
         match run {
-            RenderedRun::Text(t) => {
+            RenderedRun::Text(lines) => {
                 let scroll_offset = if i == start_run { skip_in_run } else { 0 };
-                let para = Paragraph::new(t.as_str())
+                let para = Paragraph::new(lines.clone())
                     .wrap(Wrap { trim: false })
                     .scroll((scroll_offset, 0));
                 frame.render_widget(para, rect);
@@ -413,7 +423,7 @@ fn compute_max_scroll(runs: &[RenderedRun], term_w: u16, term_h: u16) -> u16 {
     let total: u16 = runs
         .iter()
         .map(|r| match r {
-            RenderedRun::Text(t) => wrap_lines(t, body_inner_w) as u16,
+            RenderedRun::Text(lines) => wrap_lines_for(lines, body_inner_w) as u16,
             RenderedRun::Image { height, .. } => *height,
         })
         .fold(0u16, u16::saturating_add);
@@ -421,14 +431,16 @@ fn compute_max_scroll(runs: &[RenderedRun], term_w: u16, term_h: u16) -> u16 {
 }
 
 /// Cheap line-count estimator that matches what `Paragraph::wrap` does
-/// closely enough for scroll arithmetic. Counts blank lines as one row.
-fn wrap_lines(text: &str, width: usize) -> usize {
+/// closely enough for scroll arithmetic. Sums visible width across each
+/// `Line`'s spans, dividing by viewport width to count wrap rows.
+fn wrap_lines_for(lines: &[ratatui::text::Line<'static>], width: usize) -> usize {
     if width == 0 {
-        return text.lines().count().max(1);
+        return lines.len().max(1);
     }
-    text.lines()
+    lines
+        .iter()
         .map(|l| {
-            let n = l.chars().count();
+            let n: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
             if n == 0 {
                 1
             } else {

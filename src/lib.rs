@@ -2,12 +2,17 @@
 
 pub mod app;
 
+mod render;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub use mail_parser::{Message, MessageParser};
 use mail_parser::MimeHeaders;
+use ratatui::text::Line;
+
+pub use render::render_body;
 
 /// A lightweight summary of a Maildir message — enough to populate a list
 /// view without having to keep the full parsed message in memory.
@@ -21,14 +26,24 @@ pub struct Envelope {
     pub has_attachment: bool,
 }
 
-/// Width in columns used when laying out HTML-only body text. Wide enough
-/// not to wrap aggressively; the TUI will re-wrap visually anyway.
-const HTML_RENDER_WIDTH: usize = 120;
+/// A single segment of a rendered body. Text runs carry pre-styled
+/// `ratatui` lines (bold/italic/heading colour applied during parse).
+/// Image runs are placeholders to be replaced by an actual image widget
+/// at draw time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyRun {
+    Text(Vec<Line<'static>>),
+    /// Inline image referenced by Content-ID (cid:...).
+    Image(String),
+    /// Remote image referenced by absolute http(s) URL. Fetched on demand
+    /// by the TUI when the user opts in.
+    Url(String),
+}
 
 /// Return the message's explicit `text/plain` body part, or `None` if the
 /// message has only HTML. (mail-parser indexes the HTML part into
 /// `text_body` as a fallback, so we check the part's real subtype.)
-fn body_text_only(msg: &Message<'_>) -> Option<String> {
+pub(crate) fn body_text_only(msg: &Message<'_>) -> Option<String> {
     let part = msg.text_part(0)?;
     let sub = part.content_type()?.subtype()?;
     if !sub.eq_ignore_ascii_case("plain") {
@@ -37,107 +52,20 @@ fn body_text_only(msg: &Message<'_>) -> Option<String> {
     part.text_contents().map(|s| s.to_string())
 }
 
-/// Pick the cleanest plaintext rendering of the message body.
-///
-/// Prefers a real `text/plain` body part when the message has one — across
-/// the inbox that's almost always the better-formatted version. Falls back
-/// to running the `text/html` part through `html2text` when there's no
-/// text alternative (eBay-style marketing mail and other HTML-only
-/// senders). For the HTML path we also inject `[[IMG:cid]]` / `[[URL:url]]`
-/// markers so the TUI can place inline images at their positions.
-pub fn render_body(msg: &Message<'_>) -> String {
-    if let Some(text) = body_text_only(msg) {
-        return text;
+/// Return the message's `text/html` body part as a string, or `None` if
+/// the message has no real HTML part.
+pub(crate) fn body_html_only(msg: &Message<'_>) -> Option<String> {
+    let part = msg.html_part(0)?;
+    let sub = part.content_type()?.subtype()?;
+    if !sub.eq_ignore_ascii_case("html") {
+        return None;
     }
-    if let Some(part) = msg.html_part(0) {
-        if part
-            .content_type()
-            .and_then(|c| c.subtype())
-            .is_some_and(|s| s.eq_ignore_ascii_case("html"))
-        {
-            if let Some(html) = part.text_contents() {
-                let with_markers = inject_cid_markers(html);
-                return html2text::from_read(with_markers.as_bytes(), HTML_RENDER_WIDTH)
-                    .unwrap_or(with_markers);
-            }
-        }
-    }
-    String::new()
-}
-
-/// Replace every `<img ... src="cid:foo" ...>` with `[[IMG:foo]]` and every
-/// `<img ... src="https?://...">` with `[[URL:https://...]]`. The TUI uses
-/// the marker kind to decide whether to resolve from the message's
-/// inline-image map (cid) or fetch from the network (url).
-fn inject_cid_markers(html: &str) -> String {
-    use std::sync::OnceLock;
-    static CID: OnceLock<regex::Regex> = OnceLock::new();
-    static URL: OnceLock<regex::Regex> = OnceLock::new();
-    let cid_re = CID.get_or_init(|| {
-        regex::Regex::new(r#"(?is)<img[^>]*\bsrc\s*=\s*["']cid:([^"']+)["'][^>]*>"#).unwrap()
-    });
-    let url_re = URL.get_or_init(|| {
-        regex::Regex::new(r#"(?is)<img[^>]*\bsrc\s*=\s*["'](https?://[^"']+)["'][^>]*>"#).unwrap()
-    });
-    let after_cid = cid_re.replace_all(html, "[[IMG:$1]]");
-    url_re.replace_all(&after_cid, "[[URL:$1]]").into_owned()
-}
-
-/// A single segment of a rendered body: either a chunk of text or an
-/// inline-image reference (by Content-ID) that the TUI should paint with
-/// a `ratatui-image` widget at this position.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BodyRun {
-    Text(String),
-    /// Inline image referenced by Content-ID (cid:...).
-    Image(String),
-    /// Remote image referenced by absolute http(s) URL. Fetched on demand
-    /// by the TUI when the user opts in.
-    Url(String),
-}
-
-/// Parse a rendered body produced by [`render_body`] into a sequence of
-/// `BodyRun`s. Each `[[IMG:cid]]` marker becomes a [`BodyRun::Image`];
-/// surrounding text becomes [`BodyRun::Text`] runs. Empty text runs (e.g.
-/// between adjacent markers, or before/after a marker at the edge) are
-/// dropped so the caller can iterate without worrying about empty entries.
-pub fn split_body(body: &str) -> Vec<BodyRun> {
-    use std::sync::OnceLock;
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        regex::Regex::new(r"\[\[(IMG|URL):([^\]]+)\]\]").unwrap()
-    });
-
-    let mut runs = Vec::new();
-    let mut last_end = 0;
-    for m in re.captures_iter(body) {
-        let full = m.get(0).unwrap();
-        let kind = m.get(1).unwrap().as_str();
-        let value = m.get(2).unwrap().as_str().to_string();
-
-        let prefix = &body[last_end..full.start()];
-        if !prefix.is_empty() {
-            runs.push(BodyRun::Text(prefix.to_string()));
-        }
-        runs.push(match kind {
-            "IMG" => BodyRun::Image(value),
-            "URL" => BodyRun::Url(value),
-            _ => unreachable!("regex group restricts to IMG|URL"),
-        });
-        last_end = full.end();
-    }
-    let tail = &body[last_end..];
-    if !tail.is_empty() {
-        runs.push(BodyRun::Text(tail.to_string()));
-    }
-    runs
+    part.text_contents().map(|s| s.to_string())
 }
 
 /// Collect every `image/*` MIME part that carries a `Content-ID`, keyed by
 /// the bare CID (angle brackets stripped). The bytes are the decoded body
 /// of the part — ready to write to a tempfile and hand to a renderer.
-///
-/// Used to resolve `<img src="cid:foo">` references in HTML bodies.
 pub fn inline_images(msg: &Message<'_>) -> HashMap<String, Vec<u8>> {
     let mut out = HashMap::new();
     for part in msg.parts.iter() {
