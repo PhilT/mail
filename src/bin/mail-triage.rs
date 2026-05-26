@@ -56,11 +56,11 @@ fn main() -> Result<()> {
     }
 
     let mut app = App::new(envelopes.len());
-    let terminal = ratatui::init();
-    // Picker queries the terminal for protocol + font size. If that fails
-    // (non-tty, weird terminal) fall back to unicode halfblocks at a sane
-    // pixel ratio so the app still works, just with chunkier images.
+    // Pick the graphics protocol BEFORE entering raw/alt-screen mode, since
+    // from_query_stdio writes/reads control sequences on stdio and that
+    // interacts badly with ratatui's terminal setup.
     let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+    let terminal = ratatui::init();
     let result = run(terminal, &mut app, &envelopes, &mailroot, picker);
     ratatui::restore();
     result?;
@@ -307,7 +307,7 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, runs: &[RenderedRun], scrol
                 let clipped_top = i == start_run && skip_in_run > 0;
                 let clipped_bottom = take < *height;
                 if !clipped_top && !clipped_bottom {
-                    frame.render_widget(Image::new(protocol), rect);
+                    frame.render_widget(Image::new(protocol).allow_clipping(true), rect);
                 }
             }
         }
