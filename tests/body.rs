@@ -82,6 +82,62 @@ fn html_strips_style_and_script_anywhere_in_body() {
     assert!(!out.contains("alert"), "<script> bled through: {out:?}");
 }
 
+/// A multipart/related message with one HTML body that references an
+/// inline image via `cid:`. Body rendering should leave a marker where the
+/// image was so the TUI can paint the real image at that position later.
+const HTML_WITH_CID_IMG: &[u8] = b"From: a@b.com\r\n\
+Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
+Content-Type: multipart/related; boundary=\"BOUND\"\r\n\
+\r\n\
+--BOUND\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+\r\n\
+<html><body><p>Before</p><p><img src=\"cid:logo@x.com\"></p><p>After</p></body></html>\r\n\
+--BOUND\r\n\
+Content-Type: image/png\r\n\
+Content-ID: <logo@x.com>\r\n\
+Content-Transfer-Encoding: base64\r\n\
+\r\n\
+QQ==\r\n\
+--BOUND--\r\n";
+
+const HTML_WITHOUT_IMAGES: &[u8] = b"From: a@b.com\r\n\
+Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
+Content-Type: text/html\r\n\
+\r\n\
+<html><body><p>Just text.</p></body></html>\r\n";
+
+const HTML_WITH_REMOTE_IMG: &[u8] = b"From: a@b.com\r\n\
+Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
+Content-Type: text/html\r\n\
+\r\n\
+<html><body><p>Hi</p><img src=\"https://example.com/x.png\"></body></html>\r\n";
+
+#[test]
+fn cid_image_replaced_with_marker() {
+    let msg = MessageParser::default().parse(HTML_WITH_CID_IMG).unwrap();
+    let body = mail::render_body(&msg);
+    assert!(body.contains("[[IMG:logo@x.com]]"), "got: {body:?}");
+    assert!(body.contains("Before"), "got: {body:?}");
+    assert!(body.contains("After"), "got: {body:?}");
+}
+
+#[test]
+fn no_marker_when_no_inline_images() {
+    let msg = MessageParser::default().parse(HTML_WITHOUT_IMAGES).unwrap();
+    let body = mail::render_body(&msg);
+    assert!(!body.contains("[[IMG:"), "spurious marker: {body:?}");
+}
+
+#[test]
+fn remote_image_url_leaves_no_cid_marker() {
+    // Remote images are Phase D's problem; render_body should not emit a
+    // cid-style marker for an http(s) src.
+    let msg = MessageParser::default().parse(HTML_WITH_REMOTE_IMG).unwrap();
+    let body = mail::render_body(&msg);
+    assert!(!body.contains("[[IMG:"), "marker leaked: {body:?}");
+}
+
 #[test]
 fn multipart_prefers_html2text_rendered_html_over_noisy_plaintext() {
     let msg = MessageParser::default().parse(MULTIPART_BOTH).unwrap();

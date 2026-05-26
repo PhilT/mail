@@ -35,8 +35,9 @@ const HTML_RENDER_WIDTH: usize = 120;
 pub fn render_body(msg: &Message<'_>) -> String {
     if msg.html_body_count() > 0 {
         if let Some(html) = msg.body_html(0) {
-            return html2text::from_read(html.as_bytes(), HTML_RENDER_WIDTH)
-                .unwrap_or_else(|_| html.into_owned());
+            let with_markers = inject_cid_markers(&html);
+            return html2text::from_read(with_markers.as_bytes(), HTML_RENDER_WIDTH)
+                .unwrap_or(with_markers);
         }
     }
     if msg.text_body_count() > 0 {
@@ -45,6 +46,19 @@ pub fn render_body(msg: &Message<'_>) -> String {
         }
     }
     String::new()
+}
+
+/// Replace every `<img ... src="cid:foo" ...>` with a `[[IMG:foo]]` marker
+/// so the TUI can locate inline-image positions in the rendered body.
+/// http(s)://… sources are left alone — those belong to Phase D.
+fn inject_cid_markers(html: &str) -> String {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        // Lazy regex: <img ... src=("|')cid:CID("|') ... >
+        regex::Regex::new(r#"(?is)<img[^>]*\bsrc\s*=\s*["']cid:([^"']+)["'][^>]*>"#).unwrap()
+    });
+    re.replace_all(html, "[[IMG:$1]]").into_owned()
 }
 
 /// Collect every `image/*` MIME part that carries a `Content-ID`, keyed by

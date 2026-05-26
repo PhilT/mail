@@ -673,6 +673,7 @@ dependencies = [
  "html2text",
  "mail-parser",
  "ratatui",
+ "regex",
  "tempfile",
 ]
 
