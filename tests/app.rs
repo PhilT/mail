@@ -227,3 +227,25 @@ fn unrecognised_key_is_noop_and_clears_chord() {
     app.handle(Input::Char('z'));
     assert!(!app.pending_d);
 }
+
+#[test]
+fn w_returns_save_attachments() {
+    let mut app = App::new(3);
+    assert_eq!(app.handle(Input::Char('w')), AppAction::SaveAttachments);
+}
+
+#[test]
+fn flash_is_cleared_on_next_handle() {
+    let mut app = App::new(3);
+    app.flash = Some("hi".to_string());
+    app.handle(Input::Char('j'));
+    assert_eq!(app.flash, None);
+}
+
+#[test]
+fn advance_clears_flash() {
+    let mut app = App::new(3);
+    app.flash = Some("hi".to_string());
+    app.advance(AppAction::Skip);
+    assert_eq!(app.flash, None);
+}

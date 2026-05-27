@@ -191,6 +191,34 @@ fn empty_anchor_link_falls_back_to_host_label() {
     assert!(text.contains("[example.com]"), "host fallback missing: {text:?}");
 }
 
+const PLAIN_WITH_PAREN_URLS: &[u8] = b"From: a@b.com\r\n\
+Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+Rightmove Logo ( https://clicks.rightmove.co.uk/foo?lid=abc )   Start new\r\n\
+search ( https://clicks.rightmove.co.uk/bar?lid=def )\r\n\
+\r\n\
+View all results > (\r\n\
+https://clicks.rightmove.co.uk/baz\r\n\
+)\r\n\
+\r\n\
+Plain text (not a url) stays put.\r\n";
+
+#[test]
+fn parenthesised_urls_in_plaintext_are_stripped() {
+    let msg = MessageParser::default().parse(PLAIN_WITH_PAREN_URLS).unwrap();
+    let runs = mail::render_body(&msg);
+    let text = flatten_text(&runs);
+    assert!(!text.contains("https://"), "url leaked: {text:?}");
+    assert!(text.contains("Rightmove Logo"), "link text dropped: {text:?}");
+    assert!(text.contains("Start new"), "link text dropped: {text:?}");
+    assert!(text.contains("View all results"), "link text dropped: {text:?}");
+    assert!(
+        text.contains("(not a url) stays put."),
+        "non-url paren removed: {text:?}",
+    );
+}
+
 const LAYOUT_TABLE_HTML: &[u8] = b"From: a@b.com\r\n\
 Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
 Content-Type: text/html; charset=utf-8\r\n\
