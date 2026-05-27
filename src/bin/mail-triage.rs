@@ -27,21 +27,13 @@ use ratatui::widgets::{
 };
 use ratatui::DefaultTerminal;
 use ratatui_image::picker::Picker;
-use ratatui_image::protocol::Protocol;
-use ratatui_image::{Image, Resize};
+use ratatui_image::sliced::{SignedPosition, SlicedImage, SlicedProtocol};
 
 const DEFAULT_MAILROOT: &str = "/data/mail/namecheap";
 
-/// One rendered slice of a message body: either pre-styled text lines or
-/// an inline image already encoded for the active terminal.
 enum RenderedRun {
     Text(Vec<ratatui::text::Line<'static>>),
-    Image {
-        source: image::DynamicImage,
-        full: Protocol,
-        height: u16,
-        cropped: std::collections::HashMap<u16, Protocol>,
-    },
+    Image { proto: SlicedProtocol, height: u16 },
 }
 
 struct LoadedMessage {
@@ -88,7 +80,7 @@ fn run(
     app: &mut App,
     envelopes: &[Envelope],
     mailroot: &PathBuf,
-    mut picker: Picker,
+    picker: Picker,
 ) -> Result<()> {
     let mut cache: Option<LoadedMessage> = None;
     const CHORD_TIMEOUT: Duration = Duration::from_secs(5);
@@ -96,7 +88,7 @@ fn run(
 
     while !app.is_done() {
         let env = &envelopes[app.current];
-        let loaded = load_message(&mut cache, app.current, env, &mut picker, app.show_remote);
+        let loaded = load_message(&mut cache, app.current, env, &picker, app.show_remote);
 
         // Compute max_scroll from the loaded runs at the current viewport
         // width so `G` (jump-to-bottom) knows the floor. We don't have a
@@ -104,7 +96,7 @@ fn run(
         let term_size = terminal.size()?;
         app.max_scroll = compute_max_scroll(&loaded.runs, term_size.width, term_size.height);
 
-        terminal.draw(|frame| draw(frame, env, loaded, app, &mut picker))?;
+        terminal.draw(|frame| draw(frame, env, loaded, app))?;
 
         let timeout = if app.pending_d { CHORD_TIMEOUT } else { IDLE_POLL };
         if !event::poll(timeout)? {
@@ -158,7 +150,7 @@ fn load_message<'a>(
     cache: &'a mut Option<LoadedMessage>,
     idx: usize,
     env: &Envelope,
-    picker: &mut Picker,
+    picker: &Picker,
     show_remote: bool,
 ) -> &'a mut LoadedMessage {
     let needs_rebuild = match cache.as_ref() {
@@ -179,7 +171,7 @@ fn load_message<'a>(
 
 fn build_runs(
     env: &Envelope,
-    picker: &mut Picker,
+    picker: &Picker,
     show_remote: bool,
 ) -> (Vec<RenderedRun>, bool) {
     let Ok(msg) = mail::parse_file(&env.path) else {
@@ -254,7 +246,7 @@ fn fetch_remote(url: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("body: {e}"))
 }
 
-fn build_image_run(picker: &mut Picker, bytes: Option<&[u8]>) -> Option<RenderedRun> {
+fn build_image_run(picker: &Picker, bytes: Option<&[u8]>) -> Option<RenderedRun> {
     let bytes = bytes?;
     let dyn_img = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
@@ -267,34 +259,9 @@ fn build_image_run(picker: &mut Picker, bytes: Option<&[u8]>) -> Option<Rendered
     let nat_h = dyn_img.height().div_ceil(font.height as u32) as u16;
     let target = LayoutSize::new(nat_w.min(60).max(1), nat_h.max(1));
 
-    let full = picker
-        .new_protocol(dyn_img.clone(), target, Resize::Fit(None))
-        .ok()?;
-    let height = full.size().height;
-    Some(RenderedRun::Image {
-        source: dyn_img,
-        full,
-        height,
-        cropped: std::collections::HashMap::new(),
-    })
-}
-
-fn build_cropped_protocol(
-    source: &image::DynamicImage,
-    skip_rows: u16,
-    picker: &mut Picker,
-) -> Option<Protocol> {
-    let font = picker.font_size();
-    let skip_px = (skip_rows as u32).saturating_mul(font.height as u32);
-    let h = source.height();
-    if skip_px >= h {
-        return None;
-    }
-    let cropped = source.crop_imm(0, skip_px, source.width(), h - skip_px);
-    let nat_w = cropped.width().div_ceil(font.width as u32) as u16;
-    let nat_h = cropped.height().div_ceil(font.height as u32) as u16;
-    let target = LayoutSize::new(nat_w.min(60).max(1), nat_h.max(1));
-    picker.new_protocol(cropped, target, Resize::Fit(None)).ok()
+    let proto = SlicedProtocol::new(picker, dyn_img, Some(target)).ok()?;
+    let height = proto.size().height;
+    Some(RenderedRun::Image { proto, height })
 }
 
 fn map_key(key: KeyEvent) -> Option<Input> {
@@ -309,9 +276,8 @@ fn map_key(key: KeyEvent) -> Option<Input> {
 fn draw(
     frame: &mut ratatui::Frame,
     env: &Envelope,
-    loaded: &mut LoadedMessage,
+    loaded: &LoadedMessage,
     app: &App,
-    picker: &mut Picker,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -335,7 +301,7 @@ fn draw(
     );
 
     // Body
-    draw_body(frame, chunks[1], &mut loaded.runs, app.scroll, picker);
+    draw_body(frame, chunks[1], &loaded.runs, app.scroll);
 
     // Footer
     let footer = if app.pending_d {
@@ -360,9 +326,8 @@ fn draw(
 fn draw_body(
     frame: &mut ratatui::Frame,
     area: Rect,
-    runs: &mut [RenderedRun],
+    runs: &[RenderedRun],
     scroll: u16,
-    picker: &mut Picker,
 ) {
     if area.height == 0 {
         return;
@@ -421,7 +386,7 @@ fn draw_body(
             height: take,
         };
 
-        match &mut runs[i] {
+        match &runs[i] {
             RenderedRun::Text(lines) => {
                 let scroll_offset = if i == start_run { skip_in_run } else { 0 };
                 let para = Paragraph::new(lines.clone())
@@ -429,19 +394,10 @@ fn draw_body(
                     .scroll((scroll_offset, 0));
                 frame.render_widget(para, rect);
             }
-            RenderedRun::Image { source, full, cropped, .. } => {
+            RenderedRun::Image { proto, .. } => {
                 let top_skip = if i == start_run { skip_in_run } else { 0 };
-                let proto = if top_skip > 0 {
-                    if !cropped.contains_key(&top_skip) {
-                        if let Some(p) = build_cropped_protocol(source, top_skip, picker) {
-                            cropped.insert(top_skip, p);
-                        }
-                    }
-                    cropped.get(&top_skip).unwrap_or(full)
-                } else {
-                    full
-                };
-                frame.render_widget(Image::new(proto).allow_clipping(true), rect);
+                let pos = SignedPosition::from((0, -(top_skip as i16)));
+                frame.render_widget(SlicedImage::new(proto, pos), rect);
             }
         }
         y += take;
