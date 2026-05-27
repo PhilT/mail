@@ -182,73 +182,127 @@ fn image_pairs_from_html(html: &str) -> Vec<ImagePair> {
 /// of the text. Unmatched images get appended at the tail so they're
 /// still discoverable.
 fn splice_text_with_images(text: &str, pairs: &[ImagePair]) -> Vec<BodyRun> {
-    let mut runs: Vec<BodyRun> = Vec::new();
-    let mut used = vec![false; pairs.len()];
-    let mut cursor = 0;
-
-    loop {
-        // For each unused image, try its anchors in priority order; record
-        // the earliest position at which any one matches. Of all images,
-        // splice the one whose anchor appears earliest in the remaining
-        // text — so source order is preserved when anchors are spread out.
-        let mut best: Option<(usize, usize, usize)> = None; // (pos, len, idx)
-        for (i, pair) in pairs.iter().enumerate() {
-            if used[i] {
+    // Phase 1: anchor matching. For each image, find the earliest position
+    // at which any of its anchors appears anywhere in the text.
+    let mut matches: Vec<(usize, usize, usize)> = Vec::new(); // (pos, len, idx)
+    let mut unanchored: Vec<usize> = Vec::new();
+    for (i, pair) in pairs.iter().enumerate() {
+        let mut best: Option<(usize, usize)> = None;
+        for anchor in &pair.anchors {
+            if anchor.is_empty() {
                 continue;
             }
-            for anchor in &pair.anchors {
-                if anchor.is_empty() {
-                    continue;
-                }
-                if let Some(rel) = text[cursor..].find(anchor.as_str()) {
-                    let pos = cursor + rel;
-                    if best.map_or(true, |b| pos < b.0) {
-                        best = Some((pos, anchor.len(), i));
-                    }
-                    break;
+            if let Some(pos) = text.find(anchor.as_str()) {
+                if best.map_or(true, |b| pos < b.0) {
+                    best = Some((pos, anchor.len()));
                 }
             }
         }
+        match best {
+            Some((pos, len)) => matches.push((pos, len, i)),
+            None => unanchored.push(i),
+        }
+    }
 
-        let Some((pos, needle_len, idx)) = best else { break };
+    // Sort anchor matches by position; drop overlapping ones (kick them
+    // back into unanchored so they get positional treatment).
+    matches.sort_by_key(|m| m.0);
+    let mut filtered: Vec<(usize, usize, usize)> = Vec::new();
+    let mut last_end = 0;
+    for m in matches {
+        if m.0 >= last_end {
+            last_end = m.0 + m.1;
+            filtered.push(m);
+        } else {
+            unanchored.push(m.2);
+        }
+    }
+
+    // Phase 2: positional fallback. For each remaining image (in source
+    // order), find the next standalone-URL line in the text that isn't
+    // already inside an anchored splice region.
+    let url_positions = standalone_url_positions(text);
+    let mut next_url = 0;
+    let mut positional: Vec<(usize, usize, usize)> = Vec::new();
+    for img_idx in unanchored.iter().copied() {
+        while next_url < url_positions.len() {
+            let (start, end) = url_positions[next_url];
+            next_url += 1;
+            // Skip URLs that fall inside an already-anchored region.
+            if filtered
+                .iter()
+                .any(|m| start >= m.0 && start < m.0 + m.1)
+            {
+                continue;
+            }
+            positional.push((start, end - start, img_idx));
+            break;
+        }
+    }
+
+    // Phase 3: merge anchored + positional splices in text order, walk
+    // through emitting Text and image runs.
+    let mut all: Vec<(usize, usize, usize)> = filtered;
+    all.extend(positional);
+    all.sort_by_key(|m| m.0);
+
+    let mut runs: Vec<BodyRun> = Vec::new();
+    let mut used = vec![false; pairs.len()];
+    let mut cursor = 0;
+    for (pos, len, idx) in all {
+        if pos < cursor {
+            // Overlap with a previous splice — drop this one.
+            continue;
+        }
         let prefix = &text[cursor..pos];
         if !prefix.is_empty() {
             runs.push(BodyRun::Text(plain_lines(prefix)));
         }
         runs.push(pairs[idx].run.clone());
         used[idx] = true;
-        cursor = pos + needle_len;
+        cursor = pos + len;
     }
-
     let tail = &text[cursor..];
     if !tail.is_empty() {
         runs.push(BodyRun::Text(plain_lines(tail)));
     }
 
-    // Fallback: any images we couldn't anchor go at the bottom so they're
-    // not silently dropped.
-    let unmatched: Vec<&ImagePair> = pairs
+    // Phase 4: any images still unmatched (e.g. ran out of URL lines)
+    // get appended at the bottom under a separator so they're not lost.
+    let leftovers: Vec<&ImagePair> = pairs
         .iter()
         .enumerate()
         .filter_map(|(i, p)| (!used[i]).then_some(p))
         .collect();
-    if !unmatched.is_empty() {
+    if !leftovers.is_empty() {
         let sep = Line::from(Span::styled(
             "── images ──",
             Style::default().fg(Color::DarkGray),
         ));
         runs.push(BodyRun::Text(vec![Line::default(), sep, Line::default()]));
-        for p in unmatched {
+        for p in leftovers {
             runs.push(p.run.clone());
         }
     }
 
     if runs.is_empty() {
-        // Empty body — preserve at least one empty Text run so callers
-        // don't have to handle Vec::new() specially.
         runs.push(BodyRun::Text(plain_lines("")));
     }
     runs
+}
+
+/// Find positions of lines in `text` that contain only an http(s) URL
+/// (with surrounding whitespace allowed). Returns (start, end) byte
+/// offsets of the URL itself within the line.
+fn standalone_url_positions(text: &str) -> Vec<(usize, usize)> {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"(?m)^[[:space:]]*(https?://\S+)[[:space:]]*$").unwrap()
+    });
+    re.captures_iter(text)
+        .filter_map(|c| c.get(1).map(|m| (m.start(), m.end())))
+        .collect()
 }
 
 /// HTML → Markdown via `html-to-markdown-rs`, then walk pulldown-cmark

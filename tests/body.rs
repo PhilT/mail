@@ -211,6 +211,71 @@ fn alt_placeholder_in_plaintext_splices_image_inline() {
     assert!(text.contains("After the picture."), "got: {text:?}");
 }
 
+/// Mailchimp-style fixture: the plain text has standalone destination URLs
+/// where images visually live (because Mailchimp pre-resolves the
+/// tracker URL when generating text), but the HTML has different tracker
+/// URLs for those same `<a href>`s — so href-anchoring can't match. The
+/// positional fallback (Nth unanchored image at Nth unused standalone-URL
+/// line) is what gives us correct placement.
+const MULTIPART_POSITIONAL: &[u8] = b"From: a@b.com\r\n\
+Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
+Content-Type: multipart/alternative; boundary=\"BOUND\"\r\n\
+\r\n\
+--BOUND\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+Banner one:\r\n\
+https://destination.example.com/one\r\n\
+\r\n\
+Banner two:\r\n\
+https://destination.example.com/two\r\n\
+\r\n\
+End.\r\n\
+--BOUND\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+\r\n\
+<html><body>\
+<p>Banner one:</p>\
+<a href=\"https://tracker.example.com/abc\"><img src=\"https://cdn.example.com/a.png\" alt=\"\"></a>\
+<p>Banner two:</p>\
+<a href=\"https://tracker.example.com/def\"><img src=\"https://cdn.example.com/b.png\" alt=\"\"></a>\
+<p>End.</p></body></html>\r\n\
+--BOUND--\r\n";
+
+#[test]
+fn positional_fallback_anchors_unmatched_images_to_standalone_url_lines() {
+    let msg = MessageParser::default().parse(MULTIPART_POSITIONAL).unwrap();
+    let runs = mail::render_body(&msg);
+
+    // Both images should be spliced inline (not appended). In source
+    // order: a.png at the first URL line, b.png at the second.
+    assert_eq!(
+        url_refs(&runs),
+        vec![
+            "https://cdn.example.com/a.png",
+            "https://cdn.example.com/b.png",
+        ],
+        "runs: {runs:?}",
+    );
+
+    // Verify they appear in the correct interleaved positions — text
+    // before a.png, then a.png, then b.png's preceding text, then b.png.
+    let kinds: Vec<&str> = runs
+        .iter()
+        .map(|r| match r {
+            BodyRun::Text(_) => "T",
+            BodyRun::Image(_) => "I",
+            BodyRun::Url(_) => "U",
+        })
+        .collect();
+    // No '── images ──' separator should appear since both got placed.
+    let text = flatten_text(&runs);
+    assert!(!text.contains("images"), "appended-separator leaked: {text:?}");
+    // Sequence: text, url, text, url, optional trailing text
+    assert!(kinds.starts_with(&["T", "U"]), "kinds: {kinds:?}");
+    assert_eq!(kinds.iter().filter(|k| **k == "U").count(), 2);
+}
+
 #[test]
 fn images_without_matching_alt_placeholder_are_appended() {
     // The text/plain part has no "[x]" anchor for the image, so we fall
