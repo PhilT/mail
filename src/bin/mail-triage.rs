@@ -36,7 +36,12 @@ const DEFAULT_MAILROOT: &str = "/data/mail/namecheap";
 /// an inline image already encoded for the active terminal.
 enum RenderedRun {
     Text(Vec<ratatui::text::Line<'static>>),
-    Image { protocol: Protocol, height: u16 },
+    Image {
+        source: image::DynamicImage,
+        full: Protocol,
+        height: u16,
+        cropped: std::collections::HashMap<u16, Protocol>,
+    },
 }
 
 struct LoadedMessage {
@@ -99,7 +104,7 @@ fn run(
         let term_size = terminal.size()?;
         app.max_scroll = compute_max_scroll(&loaded.runs, term_size.width, term_size.height);
 
-        terminal.draw(|frame| draw(frame, env, loaded, app))?;
+        terminal.draw(|frame| draw(frame, env, loaded, app, &mut picker))?;
 
         let timeout = if app.pending_d { CHORD_TIMEOUT } else { IDLE_POLL };
         if !event::poll(timeout)? {
@@ -155,20 +160,21 @@ fn load_message<'a>(
     env: &Envelope,
     picker: &mut Picker,
     show_remote: bool,
-) -> &'a LoadedMessage {
-    if let Some(loaded) = cache.as_ref() {
-        if loaded.index == idx && loaded.show_remote == show_remote {
-            return cache.as_ref().unwrap();
-        }
+) -> &'a mut LoadedMessage {
+    let needs_rebuild = match cache.as_ref() {
+        Some(l) => l.index != idx || l.show_remote != show_remote,
+        None => true,
+    };
+    if needs_rebuild {
+        let (runs, has_remote) = build_runs(env, picker, show_remote);
+        *cache = Some(LoadedMessage {
+            index: idx,
+            show_remote,
+            has_remote,
+            runs,
+        });
     }
-    let (runs, has_remote) = build_runs(env, picker, show_remote);
-    *cache = Some(LoadedMessage {
-        index: idx,
-        show_remote,
-        has_remote,
-        runs,
-    });
-    cache.as_ref().unwrap()
+    cache.as_mut().unwrap()
 }
 
 fn build_runs(
@@ -259,13 +265,36 @@ fn build_image_run(picker: &mut Picker, bytes: Option<&[u8]>) -> Option<Rendered
     let font = picker.font_size();
     let nat_w = dyn_img.width().div_ceil(font.width as u32) as u16;
     let nat_h = dyn_img.height().div_ceil(font.height as u32) as u16;
-    // Cap so images don't overflow the body — body width varies but 60 cols
-    // is a reasonable upper bound and Resize::Fit will scale aspect.
     let target = LayoutSize::new(nat_w.min(60).max(1), nat_h.max(1));
 
-    let protocol = picker.new_protocol(dyn_img, target, Resize::Fit(None)).ok()?;
-    let height = protocol.size().height;
-    Some(RenderedRun::Image { protocol, height })
+    let full = picker
+        .new_protocol(dyn_img.clone(), target, Resize::Fit(None))
+        .ok()?;
+    let height = full.size().height;
+    Some(RenderedRun::Image {
+        source: dyn_img,
+        full,
+        height,
+        cropped: std::collections::HashMap::new(),
+    })
+}
+
+fn build_cropped_protocol(
+    source: &image::DynamicImage,
+    skip_rows: u16,
+    picker: &mut Picker,
+) -> Option<Protocol> {
+    let font = picker.font_size();
+    let skip_px = (skip_rows as u32).saturating_mul(font.height as u32);
+    let h = source.height();
+    if skip_px >= h {
+        return None;
+    }
+    let cropped = source.crop_imm(0, skip_px, source.width(), h - skip_px);
+    let nat_w = cropped.width().div_ceil(font.width as u32) as u16;
+    let nat_h = cropped.height().div_ceil(font.height as u32) as u16;
+    let target = LayoutSize::new(nat_w.min(60).max(1), nat_h.max(1));
+    picker.new_protocol(cropped, target, Resize::Fit(None)).ok()
 }
 
 fn map_key(key: KeyEvent) -> Option<Input> {
@@ -277,7 +306,13 @@ fn map_key(key: KeyEvent) -> Option<Input> {
     }
 }
 
-fn draw(frame: &mut ratatui::Frame, env: &Envelope, loaded: &LoadedMessage, app: &App) {
+fn draw(
+    frame: &mut ratatui::Frame,
+    env: &Envelope,
+    loaded: &mut LoadedMessage,
+    app: &App,
+    picker: &mut Picker,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -300,7 +335,7 @@ fn draw(frame: &mut ratatui::Frame, env: &Envelope, loaded: &LoadedMessage, app:
     );
 
     // Body
-    draw_body(frame, chunks[1], &loaded.runs, app.scroll);
+    draw_body(frame, chunks[1], &mut loaded.runs, app.scroll, picker);
 
     // Footer
     let footer = if app.pending_d {
@@ -322,7 +357,13 @@ fn draw(frame: &mut ratatui::Frame, env: &Envelope, loaded: &LoadedMessage, app:
     frame.render_widget(Paragraph::new(footer), chunks[2]);
 }
 
-fn draw_body(frame: &mut ratatui::Frame, area: Rect, runs: &[RenderedRun], scroll: u16) {
+fn draw_body(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    runs: &mut [RenderedRun],
+    scroll: u16,
+    picker: &mut Picker,
+) {
     if area.height == 0 {
         return;
     }
@@ -358,9 +399,8 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, runs: &[RenderedRun], scrol
         start_run = i + 1;
     }
 
-    // Walk runs from start_run, painting until we run out of viewport.
     let mut y = 0u16;
-    for (i, run) in runs.iter().enumerate().skip(start_run) {
+    for i in start_run..runs.len() {
         if y >= inner.height {
             break;
         }
@@ -381,7 +421,7 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, runs: &[RenderedRun], scrol
             height: take,
         };
 
-        match run {
+        match &mut runs[i] {
             RenderedRun::Text(lines) => {
                 let scroll_offset = if i == start_run { skip_in_run } else { 0 };
                 let para = Paragraph::new(lines.clone())
@@ -389,13 +429,19 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, runs: &[RenderedRun], scrol
                     .scroll((scroll_offset, 0));
                 frame.render_widget(para, rect);
             }
-            RenderedRun::Image { protocol, .. } => {
-                // Image widget always starts from row 0 — can't render
-                // just the bottom of an image when its top is above us.
-                let top_clipped = i == start_run && skip_in_run > 0;
-                if !top_clipped {
-                    frame.render_widget(Image::new(protocol).allow_clipping(true), rect);
-                }
+            RenderedRun::Image { source, full, cropped, .. } => {
+                let top_skip = if i == start_run { skip_in_run } else { 0 };
+                let proto = if top_skip > 0 {
+                    if !cropped.contains_key(&top_skip) {
+                        if let Some(p) = build_cropped_protocol(source, top_skip, picker) {
+                            cropped.insert(top_skip, p);
+                        }
+                    }
+                    cropped.get(&top_skip).unwrap_or(full)
+                } else {
+                    full
+                };
+                frame.render_widget(Image::new(proto).allow_clipping(true), rect);
             }
         }
         y += take;
