@@ -62,54 +62,117 @@ fn looks_like_image_url(url: &str) -> bool {
         .any(|ext| lower.ends_with(ext))
 }
 
-/// One `<img>` from the HTML alternative: its alt-text (for matching the
-/// `[alt]` anchor in the plain text body) and a `BodyRun` ready to splice
-/// in at that position.
+/// One `<img>` from the HTML alternative: candidate anchor substrings to
+/// match against the plain text body (in priority order), and a
+/// `BodyRun` ready to splice in at the first matching anchor.
+///
+/// Anchor priorities:
+/// 1. Parent `<a href>` URL (when the image is inside a link) — most
+///    marketing-banner images live inside clickable links, and the
+///    plain text version usually echoes that URL standalone.
+/// 2. `[alt]` if the image has alt text.
 struct ImagePair {
-    alt: String,
+    anchors: Vec<String>,
     run: BodyRun,
 }
 
 fn image_pairs_from_html(html: &str) -> Vec<ImagePair> {
     // Go straight at the HTML rather than roundtripping through markdown:
     // html-to-markdown collapses images-inside-links with empty alt down
-    // to just the link, dropping the image. We want every <img> tag, in
-    // source order, with whatever alt attribute it has (possibly empty).
+    // to just the link, dropping the image.
     use std::sync::OnceLock;
+    static LINKED_RE: OnceLock<regex::Regex> = OnceLock::new();
     static IMG_RE: OnceLock<regex::Regex> = OnceLock::new();
     static ATTR_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let linked_re = LINKED_RE.get_or_init(|| {
+        regex::Regex::new(r#"(?is)<a\b([^>]*)>(.*?)</a>"#).unwrap()
+    });
     let img_re =
         IMG_RE.get_or_init(|| regex::Regex::new(r#"(?is)<img\b([^>]*)>"#).unwrap());
     let attr_re = ATTR_RE.get_or_init(|| {
-        regex::Regex::new(r#"(?is)\b(src|alt)\s*=\s*"([^"]*)""#).unwrap()
+        regex::Regex::new(r#"(?is)\b(src|alt|href|title)\s*=\s*"([^"]*)""#).unwrap()
     });
 
-    let mut pairs = Vec::new();
-    for cap in img_re.captures_iter(html) {
-        let attrs = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-        let mut src = None;
-        let mut alt = String::new();
-        for attr in attr_re.captures_iter(attrs) {
-            let name = attr.get(1).unwrap().as_str().to_ascii_lowercase();
-            let val = attr.get(2).unwrap().as_str();
+    #[derive(Default)]
+    struct AttrSet {
+        src: Option<String>,
+        alt: String,
+        href: Option<String>,
+        title: Option<String>,
+    }
+    let read_attrs = |attrs: &str| -> AttrSet {
+        let mut out = AttrSet::default();
+        for cap in attr_re.captures_iter(attrs) {
+            let name = cap.get(1).unwrap().as_str().to_ascii_lowercase();
+            let val = cap.get(2).unwrap().as_str().to_string();
             match name.as_str() {
-                "src" => src = Some(val.to_string()),
-                "alt" => alt = val.to_string(),
+                "src" => out.src = Some(val),
+                "alt" => out.alt = val,
+                "href" => out.href = Some(val),
+                "title" => out.title = Some(val),
                 _ => {}
             }
         }
-        let Some(url) = src else { continue };
-        let run = if let Some(cid) = url.strip_prefix("cid:") {
-            BodyRun::Image(cid.to_string())
+        out
+    };
+
+    let build_run = |url: &str| -> Option<BodyRun> {
+        if let Some(cid) = url.strip_prefix("cid:") {
+            Some(BodyRun::Image(cid.to_string()))
         } else if (url.starts_with("http://") || url.starts_with("https://"))
-            && looks_like_image_url(&url)
+            && looks_like_image_url(url)
         {
-            BodyRun::Url(url)
+            Some(BodyRun::Url(url.to_string()))
         } else {
-            continue;
-        };
-        pairs.push(ImagePair { alt, run });
+            None
+        }
+    };
+
+    // Pass 1: `<a ...> ... <img ...> ... </a>` blocks. Capture the href
+    // as a primary anchor for any contained images.
+    let mut pairs: Vec<ImagePair> = Vec::new();
+    let mut consumed_starts: Vec<usize> = Vec::new();
+    for cap in linked_re.captures_iter(html) {
+        let a_attrs = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        let inner_match = cap.get(2);
+        let inner = inner_match.map(|m| m.as_str()).unwrap_or("");
+        let inner_start_in_html = inner_match.map(|m| m.start()).unwrap_or(0);
+        let parent = read_attrs(a_attrs);
+        for img in img_re.captures_iter(inner) {
+            consumed_starts.push(inner_start_in_html + img.get(0).unwrap().start());
+            let attrs = read_attrs(img.get(1).map(|m| m.as_str()).unwrap_or(""));
+            let Some(url) = attrs.src else { continue };
+            let Some(run) = build_run(&url) else { continue };
+            let mut anchors = Vec::new();
+            if let Some(h) = parent.href.as_ref() {
+                anchors.push(h.clone());
+            }
+            if let Some(t) = parent.title.as_ref() {
+                anchors.push(t.clone());
+            }
+            if !attrs.alt.is_empty() {
+                anchors.push(format!("[{}]", attrs.alt));
+            }
+            pairs.push(ImagePair { anchors, run });
+        }
     }
+
+    // Pass 2: `<img>` tags NOT inside an `<a>` we already consumed.
+    for img in img_re.captures_iter(html) {
+        let start = img.get(0).unwrap().start();
+        if consumed_starts.iter().any(|&s| s == start) {
+            continue;
+        }
+        let attrs = read_attrs(img.get(1).map(|m| m.as_str()).unwrap_or(""));
+        let Some(url) = attrs.src else { continue };
+        let Some(run) = build_run(&url) else { continue };
+        let mut anchors = Vec::new();
+        if !attrs.alt.is_empty() {
+            anchors.push(format!("[{}]", attrs.alt));
+        }
+        pairs.push(ImagePair { anchors, run });
+    }
+
     pairs
 }
 
@@ -124,17 +187,25 @@ fn splice_text_with_images(text: &str, pairs: &[ImagePair]) -> Vec<BodyRun> {
     let mut cursor = 0;
 
     loop {
-        // Find the earliest unused `[alt]` occurrence at or after `cursor`.
+        // For each unused image, try its anchors in priority order; record
+        // the earliest position at which any one matches. Of all images,
+        // splice the one whose anchor appears earliest in the remaining
+        // text — so source order is preserved when anchors are spread out.
         let mut best: Option<(usize, usize, usize)> = None; // (pos, len, idx)
         for (i, pair) in pairs.iter().enumerate() {
-            if used[i] || pair.alt.is_empty() {
+            if used[i] {
                 continue;
             }
-            let needle = format!("[{}]", pair.alt);
-            if let Some(rel) = text[cursor..].find(&needle) {
-                let pos = cursor + rel;
-                if best.map_or(true, |b| pos < b.0) {
-                    best = Some((pos, needle.len(), i));
+            for anchor in &pair.anchors {
+                if anchor.is_empty() {
+                    continue;
+                }
+                if let Some(rel) = text[cursor..].find(anchor.as_str()) {
+                    let pos = cursor + rel;
+                    if best.map_or(true, |b| pos < b.0) {
+                        best = Some((pos, anchor.len(), i));
+                    }
+                    break;
                 }
             }
         }
