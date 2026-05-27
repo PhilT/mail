@@ -305,6 +305,23 @@ fn standalone_url_positions(text: &str) -> Vec<(usize, usize)> {
         .collect()
 }
 
+fn strip_head_metadata(html: &str) -> String {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(concat!(
+            r"(?is)<head\b[^>]*>.*?</head>",
+            r"|<style\b[^>]*>.*?</style>",
+            r"|<script\b[^>]*>.*?</script>",
+            r"|<title\b[^>]*>.*?</title>",
+            r"|<meta\b[^>]*/?>",
+            r"|<link\b[^>]*/?>",
+        ))
+        .unwrap()
+    });
+    re.replace_all(html, "").into_owned()
+}
+
 fn is_layout_table_html(html: &str) -> bool {
     use std::sync::OnceLock;
     static TABLE_RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -331,13 +348,11 @@ fn flatten_layout_tables(html: &str) -> String {
 }
 
 fn render_html(html: &str) -> Vec<BodyRun> {
-    let html_owned;
-    let html = if is_layout_table_html(html) {
-        html_owned = flatten_layout_tables(html);
-        html_owned.as_str()
-    } else {
-        html
-    };
+    let mut prepped = strip_head_metadata(html);
+    if is_layout_table_html(&prepped) {
+        prepped = flatten_layout_tables(&prepped);
+    }
+    let html = prepped.as_str();
     let options = html_to_markdown_rs::ConversionOptions::builder()
         .wrap(true)
         .wrap_width(RENDER_WIDTH)

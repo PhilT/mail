@@ -57,6 +57,8 @@ Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
 Content-Type: text/html; charset=utf-8\r\n\
 \r\n\
 <html><head>\
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+<title>Verify your email</title>\
 <style>body { color: red; background: blue; }\n@media (max-width: 600px) { .foo {display:none;} }</style>\
 <script>alert('hi');</script>\
 </head><body><p>Hello html body.</p></body></html>\r\n";
@@ -173,6 +175,8 @@ fn html_only_strips_style_and_script_content() {
     assert!(!text.contains("color: red"), "<style> bled through: {text:?}");
     assert!(!text.contains("@media"), "<style> bled through: {text:?}");
     assert!(!text.contains("alert"), "<script> bled through: {text:?}");
+    assert!(!text.contains("viewport"), "<meta> bled through: {text:?}");
+    assert!(!text.contains("Verify your email"), "<title> bled through: {text:?}");
 }
 
 #[test]
