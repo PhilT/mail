@@ -14,6 +14,26 @@ use ratatui::text::Line;
 
 pub use render::render_body;
 
+pub fn url_label(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((s, r)) => (s, r),
+        None => ("https", url),
+    };
+    let host_end = rest
+        .find(|c: char| c == '/' || c == '?' || c == '#')
+        .unwrap_or(rest.len());
+    let host = rest[..host_end].trim_start_matches("www.");
+    let path = &rest[host_end..];
+    let cut = path.find(|c: char| c == '?' || c == '#').unwrap_or(path.len());
+    let ext = std::path::Path::new(&path[..cut])
+        .extension()
+        .and_then(|e| e.to_str());
+    match ext {
+        Some(e) => format!("({e}) {scheme}://{host}"),
+        None => format!("{scheme}://{host}"),
+    }
+}
+
 /// A lightweight summary of a Maildir message — enough to populate a list
 /// view without having to keep the full parsed message in memory.
 #[derive(Debug, Clone, PartialEq, Eq)]

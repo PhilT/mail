@@ -230,7 +230,7 @@ fn build_runs(
                 if !show_remote {
                     out.push(RenderedRun::Text(plain_line(&format!(
                         "\u{1F304}  {}",
-                        url_label(&url)
+                        mail::url_label(&url)
                     ))));
                     continue;
                 }
@@ -239,12 +239,12 @@ fn build_runs(
                         Some(run) => out.push(run),
                         None => out.push(RenderedRun::Text(plain_line(&format!(
                             "\u{1F304}  {} (decode failed)",
-                            url_label(&url)
+                            mail::url_label(&url)
                         )))),
                     },
                     Err(why) => out.push(RenderedRun::Text(plain_line(&format!(
                         "\u{1F304}  {} ({why})",
-                        url_label(&url)
+                        mail::url_label(&url)
                     )))),
                 }
             }
@@ -253,25 +253,6 @@ fn build_runs(
     (out, has_remote, attachment_names)
 }
 
-fn url_label(url: &str) -> String {
-    let (scheme, rest) = match url.split_once("://") {
-        Some((s, r)) => (s, r),
-        None => ("https", url),
-    };
-    let host_end = rest
-        .find(|c: char| c == '/' || c == '?' || c == '#')
-        .unwrap_or(rest.len());
-    let host = rest[..host_end].trim_start_matches("www.");
-    let path = &rest[host_end..];
-    let cut = path.find(|c: char| c == '?' || c == '#').unwrap_or(path.len());
-    let ext = std::path::Path::new(&path[..cut])
-        .extension()
-        .and_then(|e| e.to_str());
-    match ext {
-        Some(e) => format!("({e}) {scheme}://{host}"),
-        None => format!("{scheme}://{host}"),
-    }
-}
 
 fn plain_line(s: &str) -> Vec<ratatui::text::Line<'static>> {
     vec![ratatui::text::Line::from(s.to_string())]
