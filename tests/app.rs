@@ -133,20 +133,20 @@ fn advance_doesnt_overflow_past_total() {
 }
 
 #[test]
-fn r_toggles_show_remote_and_returns_toggle_action() {
+fn i_toggles_show_remote_and_returns_toggle_action() {
     let mut app = App::new(3);
     assert!(!app.show_remote);
-    let act = app.handle(Input::Char('r'));
+    let act = app.handle(Input::Char('i'));
     assert!(matches!(act, AppAction::ToggleRemoteImages));
     assert!(app.show_remote);
-    app.handle(Input::Char('r'));
+    app.handle(Input::Char('i'));
     assert!(!app.show_remote);
 }
 
 #[test]
 fn show_remote_resets_to_off_when_advancing_to_next_message() {
     let mut app = App::new(3);
-    app.handle(Input::Char('r'));
+    app.handle(Input::Char('i'));
     assert!(app.show_remote);
     app.advance(AppAction::Skip);
     assert!(
@@ -156,11 +156,9 @@ fn show_remote_resets_to_off_when_advancing_to_next_message() {
 }
 
 #[test]
-fn s_no_longer_toggles_remote() {
+fn r_returns_reply() {
     let mut app = App::new(3);
-    let act = app.handle(Input::Char('s'));
-    assert!(matches!(act, AppAction::None));
-    assert!(!app.show_remote);
+    assert_eq!(app.handle(Input::Char('r')), AppAction::Reply);
 }
 
 #[test]

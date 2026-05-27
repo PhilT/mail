@@ -158,6 +158,9 @@ fn run(
                     Err(e) => format!("parse failed: {e}"),
                 });
             }
+            AppAction::Reply => {
+                app.flash = Some("reply: not implemented yet".to_string());
+            }
             AppAction::None
             | AppAction::ScrollUp
             | AppAction::ScrollDown
@@ -422,7 +425,7 @@ fn draw(
         ];
         if loaded.has_remote {
             let state = if app.show_remote { "on" } else { "off" };
-            parts.push(format!("[r] images: {state}"));
+            parts.push(format!("[i] images: {state}"));
         }
         if !loaded.attachment_names.is_empty() {
             parts.push("[w] save attachments".to_string());

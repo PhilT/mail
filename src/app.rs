@@ -35,6 +35,7 @@ pub enum AppAction {
     ScrollToTop,
     ScrollToBottom,
     SaveAttachments,
+    Reply,
 }
 
 #[derive(Debug, Clone)]
@@ -98,11 +99,12 @@ impl App {
                 AppAction::None
             }
             Input::Char(' ') => AppAction::Skip,
-            Input::Char('r') => {
+            Input::Char('i') => {
                 self.show_remote = !self.show_remote;
                 AppAction::ToggleRemoteImages
             }
             Input::Char('w') => AppAction::SaveAttachments,
+            Input::Char('r') => AppAction::Reply,
             Input::Char('q') => {
                 self.quit = true;
                 AppAction::Quit
