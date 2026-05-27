@@ -36,7 +36,8 @@ pub fn render_body(msg: &Message<'_>) -> Vec<BodyRun> {
         let pairs = body_html_only(msg)
             .map(|h| image_pairs_from_html(&h))
             .unwrap_or_default();
-        return splice_text_with_images(&text, &pairs);
+        let cleaned = strip_parenthesised_urls(&text);
+        return splice_text_with_images(&cleaned, &pairs);
     }
     // HTML-only: full markdown pipeline so images appear inline.
     if let Some(html) = body_html_only(msg) {
@@ -305,6 +306,26 @@ fn standalone_url_positions(text: &str) -> Vec<(usize, usize)> {
         .collect()
 }
 
+fn strip_parenthesised_urls(text: &str) -> String {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"(?s)\(\s*https?://[^)\s]+(?:\s+[^)]+)?\s*\)").unwrap()
+    });
+    re.replace_all(text, "").into_owned()
+}
+
+fn host_label(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.trim_start_matches("www.");
+    if host.is_empty() {
+        None
+    } else {
+        Some(format!("[{host}]"))
+    }
+}
+
 fn strip_head_metadata(html: &str) -> String {
     use std::sync::OnceLock;
     static RE: OnceLock<regex::Regex> = OnceLock::new();
@@ -399,9 +420,9 @@ struct RunBuilder {
     lines: Vec<Line<'static>>,
     current_line: Vec<Span<'static>>,
     style_stack: Vec<Style>,
-    /// URLs of open `<a>` links, in nesting order. Popped on End(Link) and
-    /// appended as a dim "(url)" suffix so the destination is visible.
-    link_urls: Vec<String>,
+    /// (url, span_count_at_start) for each open `<a>`. On End we use the
+    /// url as fallback text when the link had no anchor content.
+    link_urls: Vec<(String, usize)>,
     in_image: u32,
     list_depth: u32,
     table_depth: u32,
@@ -516,25 +537,21 @@ impl RunBuilder {
             Event::End(TagEnd::Strikethrough) => self.pop_style(),
 
             Event::Start(Tag::Link { dest_url, .. }) => {
-                // Push a link style; the visible text is the link's contents
-                // that follow. URL itself appears as a footnote on End.
                 self.push_style(|s| {
                     s.fg(Color::Blue).add_modifier(Modifier::UNDERLINED)
                 });
-                // Remember the URL for the End handler.
-                self.style_stack.push(LINK_SENTINEL); // marker layer
-                let _ = dest_url; // appended on End via separate stack
-                self.link_urls.push(dest_url.into_string());
+                self.link_urls
+                    .push((dest_url.into_string(), self.current_line.len()));
             }
             Event::End(TagEnd::Link) => {
-                // Pop the link-sentinel layer, then the style.
-                if let Some(url) = self.link_urls.pop() {
-                    let style = Style::default().fg(Color::DarkGray);
-                    self.current_line
-                        .push(Span::styled(format!(" ({url})"), style));
+                if let Some((url, start_len)) = self.link_urls.pop() {
+                    if self.current_line.len() == start_len {
+                        let label = host_label(&url).unwrap_or(url);
+                        let style = self.current_style();
+                        self.current_line.push(Span::styled(label, style));
+                    }
                 }
-                self.pop_style(); // sentinel
-                self.pop_style(); // style
+                self.pop_style();
             }
 
             Event::Start(Tag::Image { dest_url, .. }) => {
@@ -644,8 +661,3 @@ impl RunBuilder {
     }
 }
 
-/// No-op style layer pushed alongside the link colour layer on Start(Link),
-/// popped on End(Link). Lets the URL footnote (held in `link_urls`) ride
-/// alongside the visible style so nested links still pop in the right
-/// order.
-const LINK_SENTINEL: Style = Style::new();

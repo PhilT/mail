@@ -44,6 +44,20 @@ fn url_refs(runs: &[BodyRun]) -> Vec<&str> {
         .collect()
 }
 
+fn styled_spans<'a>(runs: &'a [BodyRun]) -> Vec<(&'a str, ratatui::style::Style)> {
+    let mut out = Vec::new();
+    for run in runs {
+        if let BodyRun::Text(lines) = run {
+            for line in lines {
+                for span in &line.spans {
+                    out.push((span.content.as_ref(), span.style));
+                }
+            }
+        }
+    }
+    out
+}
+
 // ---- fixtures ---------------------------------------------------------
 
 const PLAIN_ONLY: &[u8] = b"From: a@b.com\r\n\
@@ -131,6 +145,51 @@ Content-Type: text/html; charset=utf-8\r\n\
 \r\n\
 <html><body><p>Before the picture.</p><img src=\"https://example.com/logo.png\" alt=\"Company Logo\"><p>After the picture.</p></body></html>\r\n\
 --BOUND--\r\n";
+
+const HTML_WITH_LINK: &[u8] = b"From: a@b.com\r\n\
+Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+\r\n\
+<html><body><p>See <a href=\"https://example.com/page\">our page</a> for details.</p></body></html>\r\n";
+
+const HTML_WITH_EMPTY_ANCHOR_LINK: &[u8] = b"From: a@b.com\r\n\
+Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+\r\n\
+<html><body><p>Click <a href=\"https://example.com/x\"></a> here.</p></body></html>\r\n";
+
+#[test]
+fn link_anchor_text_is_blue_and_underlined() {
+    use ratatui::style::{Color, Modifier};
+    let msg = MessageParser::default().parse(HTML_WITH_LINK).unwrap();
+    let runs = mail::render_body(&msg);
+    let anchor = styled_spans(&runs)
+        .into_iter()
+        .find(|(s, _)| s.contains("our page"))
+        .expect("anchor span missing");
+    assert_eq!(anchor.1.fg, Some(Color::Blue));
+    assert!(anchor.1.add_modifier.contains(Modifier::UNDERLINED));
+}
+
+#[test]
+fn link_does_not_append_url_footnote() {
+    let msg = MessageParser::default().parse(HTML_WITH_LINK).unwrap();
+    let runs = mail::render_body(&msg);
+    let text = flatten_text(&runs);
+    assert!(text.contains("our page"), "anchor missing: {text:?}");
+    assert!(!text.contains("https://example.com"), "url leaked: {text:?}");
+    assert!(!text.contains("(http"), "footnote leaked: {text:?}");
+}
+
+#[test]
+fn empty_anchor_link_falls_back_to_host_label() {
+    let msg = MessageParser::default()
+        .parse(HTML_WITH_EMPTY_ANCHOR_LINK)
+        .unwrap();
+    let runs = mail::render_body(&msg);
+    let text = flatten_text(&runs);
+    assert!(text.contains("[example.com]"), "host fallback missing: {text:?}");
+}
 
 const LAYOUT_TABLE_HTML: &[u8] = b"From: a@b.com\r\n\
 Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
