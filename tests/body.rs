@@ -130,6 +130,30 @@ Content-Type: text/html; charset=utf-8\r\n\
 <html><body><p>Before the picture.</p><img src=\"https://example.com/logo.png\" alt=\"Company Logo\"><p>After the picture.</p></body></html>\r\n\
 --BOUND--\r\n";
 
+const LAYOUT_TABLE_HTML: &[u8] = b"From: a@b.com\r\n\
+Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+\r\n\
+<html><body><table><tr><td>\
+<p>First paragraph.</p>\
+<p>Second paragraph.</p>\
+<p>Third paragraph.</p>\
+</td></tr></table></body></html>\r\n";
+
+#[test]
+fn layout_table_paragraphs_dont_collapse_into_one_line() {
+    let msg = MessageParser::default().parse(LAYOUT_TABLE_HTML).unwrap();
+    let runs = mail::render_body(&msg);
+    let text = flatten_text(&runs);
+    assert!(text.contains("First paragraph."), "got: {text:?}");
+    assert!(text.contains("Second paragraph."), "got: {text:?}");
+    assert!(text.contains("Third paragraph."), "got: {text:?}");
+    assert!(
+        !text.contains("First paragraph.Second"),
+        "paragraphs merged: {text:?}"
+    );
+}
+
 // ---- tests ------------------------------------------------------------
 
 #[test]

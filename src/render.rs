@@ -305,9 +305,39 @@ fn standalone_url_positions(text: &str) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// HTML → Markdown via `html-to-markdown-rs`, then walk pulldown-cmark
-/// events to build `BodyRun`s with styled text.
+fn is_layout_table_html(html: &str) -> bool {
+    use std::sync::OnceLock;
+    static TABLE_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static TH_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let table_re = TABLE_RE.get_or_init(|| regex::Regex::new(r"(?i)<table\b").unwrap());
+    let th_re = TH_RE.get_or_init(|| regex::Regex::new(r"(?i)<th\b").unwrap());
+    table_re.is_match(html) && !th_re.is_match(html)
+}
+
+fn flatten_layout_tables(html: &str) -> String {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)</?(table|tbody|thead|tfoot|tr|td|th)\b[^>]*>").unwrap()
+    });
+    re.replace_all(html, |c: &regex::Captures| {
+        if c.get(0).unwrap().as_str().starts_with("</") {
+            "</div>"
+        } else {
+            "<div>"
+        }
+    })
+    .into_owned()
+}
+
 fn render_html(html: &str) -> Vec<BodyRun> {
+    let html_owned;
+    let html = if is_layout_table_html(html) {
+        html_owned = flatten_layout_tables(html);
+        html_owned.as_str()
+    } else {
+        html
+    };
     let options = html_to_markdown_rs::ConversionOptions::builder()
         .wrap(true)
         .wrap_width(RENDER_WIDTH)
