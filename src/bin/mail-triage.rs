@@ -41,6 +41,7 @@ struct LoadedMessage {
     show_remote: bool,
     has_remote: bool,
     runs: Vec<RenderedRun>,
+    attachment_names: Vec<String>,
 }
 
 fn main() -> Result<()> {
@@ -136,6 +137,17 @@ fn run(
                 // hides) the remote images per the new show_remote flag.
                 cache = None;
             }
+            AppAction::SaveAttachments => {
+                let downloads = PathBuf::from("/data/downloads");
+                app.flash = Some(match mail::parse_file(&env.path) {
+                    Ok(msg) => match mail::save_attachments(&msg, &downloads) {
+                        Ok(paths) if paths.is_empty() => "no attachments to save".to_string(),
+                        Ok(paths) => format!("saved {} to {}", paths.len(), downloads.display()),
+                        Err(e) => format!("save failed: {e}"),
+                    },
+                    Err(e) => format!("parse failed: {e}"),
+                });
+            }
             AppAction::None
             | AppAction::ScrollUp
             | AppAction::ScrollDown
@@ -158,12 +170,13 @@ fn load_message<'a>(
         None => true,
     };
     if needs_rebuild {
-        let (runs, has_remote) = build_runs(env, picker, show_remote);
+        let (runs, has_remote, attachment_names) = build_runs(env, picker, show_remote);
         *cache = Some(LoadedMessage {
             index: idx,
             show_remote,
             has_remote,
             runs,
+            attachment_names,
         });
     }
     cache.as_mut().unwrap()
@@ -173,17 +186,23 @@ fn build_runs(
     env: &Envelope,
     picker: &Picker,
     show_remote: bool,
-) -> (Vec<RenderedRun>, bool) {
+) -> (Vec<RenderedRun>, bool, Vec<String>) {
     let Ok(msg) = mail::parse_file(&env.path) else {
         return (
             vec![RenderedRun::Text(plain_line("(body extraction failed)"))],
             false,
+            Vec::new(),
         );
     };
     let raw_runs = mail::render_body(&msg);
     let cids = mail::inline_images(&msg);
+    let attachment_names: Vec<String> = mail::attachments(&msg)
+        .into_iter()
+        .enumerate()
+        .map(|(i, a)| a.filename.unwrap_or_else(|| format!("attachment-{i}")))
+        .collect();
 
-    let mut out = Vec::with_capacity(raw_runs.len());
+    let mut out: Vec<RenderedRun> = Vec::with_capacity(raw_runs.len());
     let mut has_remote = false;
     for r in raw_runs {
         match r {
@@ -218,11 +237,37 @@ fn build_runs(
             }
         }
     }
-    (out, has_remote)
+    (out, has_remote, attachment_names)
 }
 
 fn plain_line(s: &str) -> Vec<ratatui::text::Line<'static>> {
     vec![ratatui::text::Line::from(s.to_string())]
+}
+
+fn attachment_header_lines(
+    names: &[String],
+    flash: Option<&str>,
+) -> Vec<ratatui::text::Line<'static>> {
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::Span;
+    let mut spans = vec![Span::styled(
+        format!("\u{1F4CE} attachments ({})", names.len()),
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    if let Some(msg) = flash {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            msg.to_string(),
+            Style::default().fg(Color::Green),
+        ));
+    }
+    let mut lines: Vec<ratatui::text::Line<'static>> = Vec::with_capacity(names.len() + 2);
+    lines.push(ratatui::text::Line::from(spans));
+    for n in names {
+        lines.push(ratatui::text::Line::from(format!("  • {n}")));
+    }
+    lines.push(ratatui::text::Line::from(""));
+    lines
 }
 
 /// Browser-flavored UA so tracking-pixel servers don't reject us. Lots of
@@ -288,9 +333,17 @@ fn draw(
         ])
         .split(frame.area());
 
-    // Header
+    let attach_marker = match loaded.attachment_names.len() {
+        0 => String::new(),
+        n => format!("  \u{1F4CE}{n}"),
+    };
     let header_lines = vec![
-        Line::from(format!("[{}/{}]", app.current + 1, app.total)),
+        Line::from(format!(
+            "[{}/{}]{}",
+            app.current + 1,
+            app.total,
+            attach_marker
+        )),
         Line::from(format!("From:    {}", env.from)),
         Line::from(format!("Date:    {}", env.date_display)),
         Line::from(format!("Subject: {}", env.subject)),
@@ -300,10 +353,33 @@ fn draw(
         chunks[0],
     );
 
-    // Body
-    draw_body(frame, chunks[1], &loaded.runs, app.scroll);
+    let body_area = if !loaded.attachment_names.is_empty() {
+        let lines = attachment_header_lines(&loaded.attachment_names, app.flash.as_deref());
+        let h = lines.len() as u16;
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(h), Constraint::Min(0)])
+            .split(chunks[1]);
+        frame.render_widget(Paragraph::new(lines), split[0]);
+        split[1]
+    } else if let Some(msg) = &app.flash {
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(chunks[1]);
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                format!("  {msg}"),
+                ratatui::style::Style::default().fg(ratatui::style::Color::Green),
+            )),
+            split[0],
+        );
+        split[1]
+    } else {
+        chunks[1]
+    };
+    draw_body(frame, body_area, &loaded.runs, app.scroll);
 
-    // Footer
     let footer = if app.pending_d {
         "  press 'd' again to delete  ·  any other key cancels".to_string()
     } else {
@@ -315,6 +391,9 @@ fn draw(
         if loaded.has_remote {
             let state = if app.show_remote { "on" } else { "off" };
             parts.push(format!("[r] images: {state}"));
+        }
+        if !loaded.attachment_names.is_empty() {
+            parts.push("[w] save attachments".to_string());
         }
         parts.push("[j/k] scroll".to_string());
         parts.push("[q] quit".to_string());

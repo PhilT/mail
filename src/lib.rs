@@ -63,6 +63,75 @@ pub(crate) fn body_html_only(msg: &Message<'_>) -> Option<String> {
     part.text_contents().map(|s| s.to_string())
 }
 
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub filename: Option<String>,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
+pub fn attachments(msg: &Message<'_>) -> Vec<Attachment> {
+    msg.attachments()
+        .map(|part| {
+            let content_type = part
+                .content_type()
+                .map(|c| {
+                    let main = c.ctype();
+                    match c.subtype() {
+                        Some(sub) => format!("{main}/{sub}"),
+                        None => main.to_string(),
+                    }
+                })
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            Attachment {
+                filename: part.attachment_name().map(|s| s.to_string()),
+                content_type,
+                bytes: part.contents().to_vec(),
+            }
+        })
+        .collect()
+}
+
+pub fn save_attachments(msg: &Message<'_>, dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    fs::create_dir_all(dir)?;
+    let mut out = Vec::new();
+    for (i, att) in attachments(msg).into_iter().enumerate() {
+        let base = att
+            .filename
+            .as_deref()
+            .map(sanitize_filename)
+            .unwrap_or_else(|| format!("attachment-{i}"));
+        let dest = unique_path(dir, &base);
+        fs::write(&dest, &att.bytes)?;
+        out.push(dest);
+    }
+    Ok(out)
+}
+
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| if c == '/' || c == '\0' { '_' } else { c })
+        .collect()
+}
+
+fn unique_path(dir: &Path, name: &str) -> PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    for n in 1..=9999 {
+        let p = dir.join(format!("{stem}-{n}{ext}"));
+        if !p.exists() {
+            return p;
+        }
+    }
+    dir.join(format!("{stem}-{}{ext}", std::process::id()))
+}
+
 /// Collect every `image/*` MIME part that carries a `Content-ID`, keyed by
 /// the bare CID (angle brackets stripped). The bytes are the decoded body
 /// of the part — ready to write to a tempfile and hand to a renderer.

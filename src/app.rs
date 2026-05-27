@@ -34,6 +34,7 @@ pub enum AppAction {
     ToggleRemoteImages,
     ScrollToTop,
     ScrollToBottom,
+    SaveAttachments,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +47,7 @@ pub struct App {
     /// Updated by the drawer each frame so `G` knows where the bottom is.
     pub max_scroll: u16,
     pub show_remote: bool,
+    pub flash: Option<String>,
     pub n_archived: u32,
     pub n_deleted: u32,
     pub n_skipped: u32,
@@ -62,6 +64,7 @@ impl App {
             scroll: 0,
             max_scroll: 0,
             show_remote: false,
+            flash: None,
             n_archived: 0,
             n_deleted: 0,
             n_skipped: 0,
@@ -74,6 +77,7 @@ impl App {
     }
 
     pub fn handle(&mut self, input: Input) -> AppAction {
+        self.flash = None;
         // Any key other than another 'd' cancels a pending dd chord;
         // any key other than another 'g' cancels a pending gg chord.
         if self.pending_d && input != Input::Char('d') {
@@ -98,6 +102,7 @@ impl App {
                 self.show_remote = !self.show_remote;
                 AppAction::ToggleRemoteImages
             }
+            Input::Char('w') => AppAction::SaveAttachments,
             Input::Char('q') => {
                 self.quit = true;
                 AppAction::Quit
@@ -154,5 +159,6 @@ impl App {
         self.pending_d = false;
         self.pending_g = false;
         self.show_remote = false;
+        self.flash = None;
     }
 }
