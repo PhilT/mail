@@ -16,6 +16,10 @@ path = "src/bin/mail-triage.rs"
 name = "mail-dump"
 path = "src/bin/mail-dump.rs"
 
+[[bin]]
+name = "mail-find"
+path = "src/bin/mail-find.rs"
+
 [dependencies]
 anyhow = "1"
 crossterm = "0.29"

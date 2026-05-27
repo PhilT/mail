@@ -51,6 +51,17 @@ fn plain_lines(text: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// True if a URL's path (before query string) ends with a common image
+/// extension. Filters out Outlook-style inbox deep links that get
+/// rewritten as image srcs but aren't actually images.
+fn looks_like_image_url(url: &str) -> bool {
+    let cut = url.find('?').or_else(|| url.find('#')).unwrap_or(url.len());
+    let lower = url[..cut].to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
 /// One `<img>` from the HTML alternative: its alt-text (for matching the
 /// `[alt]` anchor in the plain text body) and a `BodyRun` ready to splice
 /// in at that position.
@@ -79,9 +90,13 @@ fn image_pairs_from_html(html: &str) -> Vec<ImagePair> {
                 if let Some((alt, url)) = pending.pop() {
                     let run = if let Some(cid) = url.strip_prefix("cid:") {
                         BodyRun::Image(cid.to_string())
-                    } else if url.starts_with("http://") || url.starts_with("https://") {
+                    } else if (url.starts_with("http://") || url.starts_with("https://"))
+                        && looks_like_image_url(&url)
+                    {
                         BodyRun::Url(url)
                     } else {
+                        // e.g. Outlook rewrites image srcs to inbox deep
+                        // links that aren't real images. Skip silently.
                         continue;
                     };
                     pairs.push(ImagePair { alt, run });
@@ -346,11 +361,12 @@ impl RunBuilder {
                 let url = dest_url.into_string();
                 if let Some(cid) = url.strip_prefix("cid:") {
                     self.runs.push(BodyRun::Image(cid.to_string()));
-                } else if url.starts_with("http://") || url.starts_with("https://") {
+                } else if (url.starts_with("http://") || url.starts_with("https://"))
+                    && looks_like_image_url(&url)
+                {
                     self.runs.push(BodyRun::Url(url));
-                } else {
-                    // Unknown scheme — drop silently.
                 }
+                // Other URLs (e.g. Outlook deep links) drop silently.
             }
             Event::End(TagEnd::Image) => {
                 self.in_image = self.in_image.saturating_sub(1);
