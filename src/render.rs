@@ -28,15 +28,15 @@ const RENDER_WIDTH: usize = 120;
 pub fn render_body(msg: &Message<'_>) -> Vec<BodyRun> {
     // Plain-text-with-both: many senders ship a clean text/plain alongside
     // a layout-table HTML version whose only visible content is the
-    // template logo and footer. Use the text for the body, then append any
-    // images the HTML mentions as a trailing "── images ──" block so they
-    // still appear.
+    // template logo and footer. Use the text for the body, then splice any
+    // images the HTML mentions inline at their `[alt-text]` anchor in the
+    // text (the convention most senders follow). Unmatched images get
+    // appended at the end as a fallback so they're not lost.
     if let Some(text) = body_text_only(msg) {
-        let mut runs = vec![BodyRun::Text(plain_lines(&text))];
-        if let Some(html) = body_html_only(msg) {
-            runs.extend(image_runs_from_html(&html));
-        }
-        return runs;
+        let pairs = body_html_only(msg)
+            .map(|h| image_pairs_from_html(&h))
+            .unwrap_or_default();
+        return splice_text_with_images(&text, &pairs);
     }
     // HTML-only: full markdown pipeline so images appear inline.
     if let Some(html) = body_html_only(msg) {
@@ -51,41 +51,117 @@ fn plain_lines(text: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Extract just the images from an HTML body (cid: and http(s)://), as
-/// `BodyRun`s preceded by a "── images ──" separator line. Used to attach
-/// imagery to a message we're rendering from its text/plain alternative.
-fn image_runs_from_html(html: &str) -> Vec<BodyRun> {
+/// One `<img>` from the HTML alternative: its alt-text (for matching the
+/// `[alt]` anchor in the plain text body) and a `BodyRun` ready to splice
+/// in at that position.
+struct ImagePair {
+    alt: String,
+    run: BodyRun,
+}
+
+fn image_pairs_from_html(html: &str) -> Vec<ImagePair> {
     let options = html_to_markdown_rs::ConversionOptions::builder().build();
     let Ok(result) = html_to_markdown_rs::convert(html, Some(options)) else {
         return Vec::new();
     };
     let md = result.content.unwrap_or_default();
 
-    let mut images: Vec<BodyRun> = Vec::new();
-    let parser_options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
-    for event in Parser::new_ext(&md, parser_options) {
-        if let Event::Start(Tag::Image { dest_url, .. }) = event {
-            let url = dest_url.into_string();
-            if let Some(cid) = url.strip_prefix("cid:") {
-                images.push(BodyRun::Image(cid.to_string()));
-            } else if url.starts_with("http://") || url.starts_with("https://") {
-                images.push(BodyRun::Url(url));
+    // Plain CommonMark — ENABLE_TABLES messes with `| | ![alt](url)`-shaped
+    // lines that html-to-markdown emits for layout-table HTML.
+    let mut pairs = Vec::new();
+    let mut pending: Vec<(String, String)> = Vec::new(); // (alt_so_far, url)
+    for event in Parser::new(&md) {
+        match event {
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                pending.push((String::new(), dest_url.into_string()));
             }
+            Event::End(TagEnd::Image) => {
+                if let Some((alt, url)) = pending.pop() {
+                    let run = if let Some(cid) = url.strip_prefix("cid:") {
+                        BodyRun::Image(cid.to_string())
+                    } else if url.starts_with("http://") || url.starts_with("https://") {
+                        BodyRun::Url(url)
+                    } else {
+                        continue;
+                    };
+                    pairs.push(ImagePair { alt, run });
+                }
+            }
+            // Inside an image's alt text — accumulate.
+            Event::Text(t) | Event::Code(t) if !pending.is_empty() => {
+                pending.last_mut().unwrap().0.push_str(&t);
+            }
+            _ => {}
+        }
+    }
+    pairs
+}
+
+/// Walk the plain-text body left to right, looking for any unused
+/// `[alt-text]` anchor that matches one of the HTML images. Each match
+/// splits the text into a Text run + the matching image run + the rest
+/// of the text. Unmatched images get appended at the tail so they're
+/// still discoverable.
+fn splice_text_with_images(text: &str, pairs: &[ImagePair]) -> Vec<BodyRun> {
+    let mut runs: Vec<BodyRun> = Vec::new();
+    let mut used = vec![false; pairs.len()];
+    let mut cursor = 0;
+
+    loop {
+        // Find the earliest unused `[alt]` occurrence at or after `cursor`.
+        let mut best: Option<(usize, usize, usize)> = None; // (pos, len, idx)
+        for (i, pair) in pairs.iter().enumerate() {
+            if used[i] || pair.alt.is_empty() {
+                continue;
+            }
+            let needle = format!("[{}]", pair.alt);
+            if let Some(rel) = text[cursor..].find(&needle) {
+                let pos = cursor + rel;
+                if best.map_or(true, |b| pos < b.0) {
+                    best = Some((pos, needle.len(), i));
+                }
+            }
+        }
+
+        let Some((pos, needle_len, idx)) = best else { break };
+        let prefix = &text[cursor..pos];
+        if !prefix.is_empty() {
+            runs.push(BodyRun::Text(plain_lines(prefix)));
+        }
+        runs.push(pairs[idx].run.clone());
+        used[idx] = true;
+        cursor = pos + needle_len;
+    }
+
+    let tail = &text[cursor..];
+    if !tail.is_empty() {
+        runs.push(BodyRun::Text(plain_lines(tail)));
+    }
+
+    // Fallback: any images we couldn't anchor go at the bottom so they're
+    // not silently dropped.
+    let unmatched: Vec<&ImagePair> = pairs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| (!used[i]).then_some(p))
+        .collect();
+    if !unmatched.is_empty() {
+        let sep = Line::from(Span::styled(
+            "── images ──",
+            Style::default().fg(Color::DarkGray),
+        ));
+        runs.push(BodyRun::Text(vec![Line::default(), sep, Line::default()]));
+        for p in unmatched {
+            runs.push(p.run.clone());
         }
     }
 
-    if images.is_empty() {
-        return Vec::new();
+    if runs.is_empty() {
+        // Empty body — preserve at least one empty Text run so callers
+        // don't have to handle Vec::new() specially.
+        runs.push(BodyRun::Text(plain_lines("")));
     }
-
-    let sep = Line::from(Span::styled(
-        "── images ──",
-        Style::default().fg(Color::DarkGray),
-    ));
-    let mut out = Vec::with_capacity(images.len() + 1);
-    out.push(BodyRun::Text(vec![Line::default(), sep, Line::default()]));
-    out.extend(images);
-    out
+    runs
 }
 
 /// HTML → Markdown via `html-to-markdown-rs`, then walk pulldown-cmark

@@ -14,6 +14,17 @@ fn main() -> Result<()> {
         .into();
     let msg = mail::parse_file(&path)?;
 
+    // Dump the text/plain part too, if any.
+    if let Some(text_part) = msg.text_part(0) {
+        if let Some(sub) = text_part.content_type().and_then(|c| c.subtype()) {
+            println!("text part subtype = {sub}");
+        }
+        if let Some(text) = text_part.text_contents() {
+            std::fs::write("/tmp/mail-triage-last.txt", text)?;
+            println!("text bytes: {}  (-> /tmp/mail-triage-last.txt)", text.len());
+        }
+    }
+
     let part = msg.html_part(0).context("no html part")?;
     let sub = part
         .content_type()
@@ -37,6 +48,24 @@ fn main() -> Result<()> {
 
     println!("html bytes: {}", html.len());
     println!("md   bytes: {}", md.len());
-    println!("written to /tmp/mail-triage-last.{{html,md}}");
+
+    // And what does render_body think?
+    let runs = mail::render_body(&msg);
+    println!("render_body produced {} run(s):", runs.len());
+    for (i, r) in runs.iter().enumerate() {
+        match r {
+            mail::BodyRun::Text(lines) => {
+                let chars: usize = lines
+                    .iter()
+                    .flat_map(|l| l.spans.iter().map(|s| s.content.chars().count()))
+                    .sum();
+                println!("  [{i}] Text: {} line(s), {} chars", lines.len(), chars);
+            }
+            mail::BodyRun::Image(c) => println!("  [{i}] Image cid: {c}"),
+            mail::BodyRun::Url(u) => println!("  [{i}] Url: {u}"),
+        }
+    }
+
+    println!("written to /tmp/mail-triage-last.{{html,md,txt}}");
     Ok(())
 }

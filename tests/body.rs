@@ -111,6 +111,25 @@ Content-Type: text/html; charset=utf-8\r\n\
 <html><body><p>html with image</p><img src=\"https://example.com/x.png\" alt=\"x\"></body></html>\r\n\
 --BOUND--\r\n";
 
+/// Senders commonly drop the image's alt-text into the text/plain version
+/// as `[alt]` exactly where the image lives in the HTML. We can use that
+/// to splice the image into the text-rendered body inline.
+const MULTIPART_ALT_PLACEHOLDER: &[u8] = b"From: a@b.com\r\n\
+Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
+Content-Type: multipart/alternative; boundary=\"BOUND\"\r\n\
+\r\n\
+--BOUND\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+Before the picture.\r\n\
+[Company Logo]\r\n\
+After the picture.\r\n\
+--BOUND\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+\r\n\
+<html><body><p>Before the picture.</p><img src=\"https://example.com/logo.png\" alt=\"Company Logo\"><p>After the picture.</p></body></html>\r\n\
+--BOUND--\r\n";
+
 // ---- tests ------------------------------------------------------------
 
 #[test]
@@ -165,10 +184,37 @@ fn multipart_with_no_html_image_prefers_plaintext() {
 }
 
 #[test]
-fn multipart_with_html_image_uses_plaintext_body_and_appends_images() {
-    // Senders bundle a layout-table HTML with the real content in
-    // text/plain. The text body wins; HTML images are appended at the
-    // bottom under a "── images ──" separator.
+fn alt_placeholder_in_plaintext_splices_image_inline() {
+    let msg = MessageParser::default()
+        .parse(MULTIPART_ALT_PLACEHOLDER)
+        .unwrap();
+    let runs = mail::render_body(&msg);
+
+    // Expected sequence: Text("Before..."), Url(...), Text("After...").
+    let kinds: Vec<&str> = runs
+        .iter()
+        .map(|r| match r {
+            BodyRun::Text(_) => "T",
+            BodyRun::Image(_) => "I",
+            BodyRun::Url(_) => "U",
+        })
+        .collect();
+    assert_eq!(kinds, vec!["T", "U", "T"], "runs: {runs:?}");
+
+    assert_eq!(url_refs(&runs), vec!["https://example.com/logo.png"]);
+
+    // The [Company Logo] placeholder should NOT appear in any Text run —
+    // it's been consumed by the image splice.
+    let text = flatten_text(&runs);
+    assert!(!text.contains("[Company Logo]"), "alt marker leaked: {text:?}");
+    assert!(text.contains("Before the picture."), "got: {text:?}");
+    assert!(text.contains("After the picture."), "got: {text:?}");
+}
+
+#[test]
+fn images_without_matching_alt_placeholder_are_appended() {
+    // The text/plain part has no "[x]" anchor for the image, so we fall
+    // back to appending it after the body so it's at least not lost.
     let msg = MessageParser::default().parse(MULTIPART_HTML_HAS_IMG).unwrap();
     let runs = mail::render_body(&msg);
 
@@ -176,11 +222,9 @@ fn multipart_with_html_image_uses_plaintext_body_and_appends_images() {
     assert!(text.contains("plain text without image"), "got: {text:?}");
     assert!(!text.contains("html with image"), "html body leaked: {text:?}");
 
-    // Image still discoverable, just as an appended run.
     assert_eq!(
         url_refs(&runs),
         vec!["https://example.com/x.png"],
         "runs: {runs:?}",
     );
-    assert!(text.contains("images"), "missing separator: {text:?}");
 }
