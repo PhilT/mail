@@ -398,8 +398,18 @@ fn draw(
     };
     draw_body(frame, body_area, &loaded.runs, app.scroll);
 
-    let footer = if app.pending_d {
-        "  press 'd' again to delete  ·  any other key cancels".to_string()
+    if app.pending_d {
+        let line = Line::from(vec![
+            ratatui::text::Span::raw("  "),
+            ratatui::text::Span::styled(
+                "press 'd' again to delete",
+                ratatui::style::Style::default()
+                    .fg(ratatui::style::Color::Red)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+            ratatui::text::Span::raw("  ·  any other key cancels"),
+        ]);
+        frame.render_widget(Paragraph::new(line), chunks[2]);
     } else {
         let mut parts = vec![
             "[x] archive".to_string(),
@@ -415,9 +425,9 @@ fn draw(
         }
         parts.push("[j/k] scroll".to_string());
         parts.push("[q] quit".to_string());
-        format!("  {}", parts.join("  "))
-    };
-    frame.render_widget(Paragraph::new(footer), chunks[2]);
+        let footer = format!("  {}", parts.join("  "));
+        frame.render_widget(Paragraph::new(footer), chunks[2]);
+    }
 }
 
 fn draw_body(
