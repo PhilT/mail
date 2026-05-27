@@ -71,43 +71,44 @@ struct ImagePair {
 }
 
 fn image_pairs_from_html(html: &str) -> Vec<ImagePair> {
-    let options = html_to_markdown_rs::ConversionOptions::builder().build();
-    let Ok(result) = html_to_markdown_rs::convert(html, Some(options)) else {
-        return Vec::new();
-    };
-    let md = result.content.unwrap_or_default();
+    // Go straight at the HTML rather than roundtripping through markdown:
+    // html-to-markdown collapses images-inside-links with empty alt down
+    // to just the link, dropping the image. We want every <img> tag, in
+    // source order, with whatever alt attribute it has (possibly empty).
+    use std::sync::OnceLock;
+    static IMG_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static ATTR_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let img_re =
+        IMG_RE.get_or_init(|| regex::Regex::new(r#"(?is)<img\b([^>]*)>"#).unwrap());
+    let attr_re = ATTR_RE.get_or_init(|| {
+        regex::Regex::new(r#"(?is)\b(src|alt)\s*=\s*"([^"]*)""#).unwrap()
+    });
 
-    // Plain CommonMark — ENABLE_TABLES messes with `| | ![alt](url)`-shaped
-    // lines that html-to-markdown emits for layout-table HTML.
     let mut pairs = Vec::new();
-    let mut pending: Vec<(String, String)> = Vec::new(); // (alt_so_far, url)
-    for event in Parser::new(&md) {
-        match event {
-            Event::Start(Tag::Image { dest_url, .. }) => {
-                pending.push((String::new(), dest_url.into_string()));
+    for cap in img_re.captures_iter(html) {
+        let attrs = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+        let mut src = None;
+        let mut alt = String::new();
+        for attr in attr_re.captures_iter(attrs) {
+            let name = attr.get(1).unwrap().as_str().to_ascii_lowercase();
+            let val = attr.get(2).unwrap().as_str();
+            match name.as_str() {
+                "src" => src = Some(val.to_string()),
+                "alt" => alt = val.to_string(),
+                _ => {}
             }
-            Event::End(TagEnd::Image) => {
-                if let Some((alt, url)) = pending.pop() {
-                    let run = if let Some(cid) = url.strip_prefix("cid:") {
-                        BodyRun::Image(cid.to_string())
-                    } else if (url.starts_with("http://") || url.starts_with("https://"))
-                        && looks_like_image_url(&url)
-                    {
-                        BodyRun::Url(url)
-                    } else {
-                        // e.g. Outlook rewrites image srcs to inbox deep
-                        // links that aren't real images. Skip silently.
-                        continue;
-                    };
-                    pairs.push(ImagePair { alt, run });
-                }
-            }
-            // Inside an image's alt text — accumulate.
-            Event::Text(t) | Event::Code(t) if !pending.is_empty() => {
-                pending.last_mut().unwrap().0.push_str(&t);
-            }
-            _ => {}
         }
+        let Some(url) = src else { continue };
+        let run = if let Some(cid) = url.strip_prefix("cid:") {
+            BodyRun::Image(cid.to_string())
+        } else if (url.starts_with("http://") || url.starts_with("https://"))
+            && looks_like_image_url(&url)
+        {
+            BodyRun::Url(url)
+        } else {
+            continue;
+        };
+        pairs.push(ImagePair { alt, run });
     }
     pairs
 }
@@ -185,6 +186,17 @@ fn render_html(html: &str) -> Vec<BodyRun> {
     let options = html_to_markdown_rs::ConversionOptions::builder()
         .wrap(true)
         .wrap_width(RENDER_WIDTH)
+        // Marketing email HTML nests images inside <td>/<tr>/<table> for
+        // layout; the default keep_inline_images_in list is too narrow
+        // and drops them. Override with every container we plausibly see.
+        .keep_inline_images_in(
+            ["p", "div", "td", "th", "tr", "table", "tbody", "thead",
+             "li", "ul", "ol", "a", "span", "section", "article",
+             "header", "footer", "main", "body", "blockquote"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        )
         .build();
     let md = match html_to_markdown_rs::convert(html, Some(options)) {
         Ok(r) => r.content.unwrap_or_default(),

@@ -27,6 +27,7 @@ html-to-markdown-rs = "3"
 mail-parser = "0.11"
 pulldown-cmark = { version = "0.13", default-features = false }
 ratatui = "0.30"
+regex = "1"
 ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults"] }
 image = "0.25"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
