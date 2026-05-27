@@ -229,7 +229,7 @@ fn build_runs(
                 has_remote = true;
                 if !show_remote {
                     out.push(RenderedRun::Text(plain_line(&format!(
-                        "\u{1F304}  {}",
+                        "\u{1F304} {}",
                         mail::url_label(&url)
                     ))));
                     continue;
@@ -238,12 +238,12 @@ fn build_runs(
                     Ok(bytes) => match build_image_run(picker, Some(&bytes)) {
                         Some(run) => out.push(run),
                         None => out.push(RenderedRun::Text(plain_line(&format!(
-                            "\u{1F304}  {} (decode failed)",
+                            "\u{1F304} {} (decode failed)",
                             mail::url_label(&url)
                         )))),
                     },
                     Err(why) => out.push(RenderedRun::Text(plain_line(&format!(
-                        "\u{1F304}  {} ({why})",
+                        "\u{1F304} {} ({why})",
                         mail::url_label(&url)
                     )))),
                 }

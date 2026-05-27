@@ -26,24 +26,65 @@ const RENDER_WIDTH: usize = 120;
 ///   image, the HTML drives the output via the markdown pipeline.
 /// - HTML-only messages always go through the markdown pipeline.
 pub fn render_body(msg: &Message<'_>) -> Vec<BodyRun> {
-    // Plain-text-with-both: many senders ship a clean text/plain alongside
-    // a layout-table HTML version whose only visible content is the
-    // template logo and footer. Use the text for the body, then splice any
-    // images the HTML mentions inline at their `[alt-text]` anchor in the
-    // text (the convention most senders follow). Unmatched images get
-    // appended at the end as a fallback so they're not lost.
-    if let Some(text) = body_text_only(msg) {
+    let mut runs = if let Some(text) = body_text_only(msg) {
         let pairs = body_html_only(msg)
             .map(|h| image_pairs_from_html(&h))
             .unwrap_or_default();
         let cleaned = strip_parenthesised_urls(&text);
-        return splice_text_with_images(&cleaned, &pairs);
+        splice_text_with_images(&cleaned, &pairs)
+    } else if let Some(html) = body_html_only(msg) {
+        render_html(&html)
+    } else {
+        Vec::new()
+    };
+    for run in &mut runs {
+        if let BodyRun::Text(lines) = run {
+            collapse_blank_lines(lines);
+        }
     }
-    // HTML-only: full markdown pipeline so images appear inline.
-    if let Some(html) = body_html_only(msg) {
-        return render_html(&html);
+    let mut prev_ended_blank = true;
+    for run in &mut runs {
+        match run {
+            BodyRun::Text(lines) => {
+                if prev_ended_blank {
+                    while lines.first().is_some_and(line_is_blank) {
+                        lines.remove(0);
+                    }
+                }
+                prev_ended_blank = lines.last().is_none_or(line_is_blank);
+            }
+            BodyRun::Image(_) | BodyRun::Url(_) => prev_ended_blank = false,
+        }
     }
-    Vec::new()
+    runs.retain(|r| match r {
+        BodyRun::Text(lines) => !lines.is_empty(),
+        _ => true,
+    });
+    runs
+}
+
+fn is_visible_char(c: char) -> bool {
+    !c.is_whitespace()
+        && !matches!(
+            c,
+            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}' | '\u{034F}' | '│'
+        )
+}
+
+fn line_is_blank(l: &Line<'static>) -> bool {
+    l.spans
+        .iter()
+        .all(|s| !s.content.chars().any(is_visible_char))
+}
+
+fn collapse_blank_lines(lines: &mut Vec<Line<'static>>) {
+    let mut prev_blank = false;
+    lines.retain(|l| {
+        let blank = line_is_blank(l);
+        let keep = !(blank && prev_blank);
+        prev_blank = blank;
+        keep
+    });
 }
 
 fn plain_lines(text: &str) -> Vec<Line<'static>> {
@@ -420,9 +461,7 @@ struct RunBuilder {
     lines: Vec<Line<'static>>,
     current_line: Vec<Span<'static>>,
     style_stack: Vec<Style>,
-    /// (url, span_count_at_start) for each open `<a>`. On End we use the
-    /// url as fallback text when the link had no anchor content.
-    link_urls: Vec<(String, usize)>,
+    link_urls: Vec<(String, usize, usize)>,
     in_image: u32,
     list_depth: u32,
     table_depth: u32,
@@ -540,12 +579,17 @@ impl RunBuilder {
                 self.push_style(|s| {
                     s.fg(Color::Blue).add_modifier(Modifier::UNDERLINED)
                 });
-                self.link_urls
-                    .push((dest_url.into_string(), self.current_line.len()));
+                self.link_urls.push((
+                    dest_url.into_string(),
+                    self.current_line.len(),
+                    self.runs.len(),
+                ));
             }
             Event::End(TagEnd::Link) => {
-                if let Some((url, start_len)) = self.link_urls.pop() {
-                    if self.current_line.len() == start_len {
+                if let Some((url, start_line_len, start_runs_len)) = self.link_urls.pop() {
+                    let emitted_inline = self.current_line.len() > start_line_len;
+                    let emitted_image = self.runs.len() > start_runs_len;
+                    if !emitted_inline && !emitted_image {
                         let label = host_label(&url).unwrap_or(url);
                         let style = self.current_style();
                         self.current_line.push(Span::styled(label, style));

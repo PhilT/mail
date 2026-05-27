@@ -191,6 +191,30 @@ fn empty_anchor_link_falls_back_to_host_label() {
     assert!(text.contains("[example.com]"), "host fallback missing: {text:?}");
 }
 
+const PLAIN_WITH_BLANK_RUNS: &[u8] = b"From: a@b.com\r\n\
+Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+First.\r\n\
+\r\n\
+\r\n\
+\r\n\
+Second.\r\n\
+\r\n\
+\r\n\
+Third.\r\n";
+
+#[test]
+fn consecutive_blank_lines_collapse_to_one() {
+    let msg = MessageParser::default().parse(PLAIN_WITH_BLANK_RUNS).unwrap();
+    let runs = mail::render_body(&msg);
+    let text = flatten_text(&runs);
+    assert!(!text.contains("\n\n\n"), "triple blank survived: {text:?}");
+    assert!(text.contains("First."), "text dropped: {text:?}");
+    assert!(text.contains("Second."), "text dropped: {text:?}");
+    assert!(text.contains("Third."), "text dropped: {text:?}");
+}
+
 const PLAIN_WITH_PAREN_URLS: &[u8] = b"From: a@b.com\r\n\
 Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
 Content-Type: text/plain; charset=utf-8\r\n\
