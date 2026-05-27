@@ -389,16 +389,11 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, runs: &[RenderedRun], scrol
                     .scroll((scroll_offset, 0));
                 frame.render_widget(para, rect);
             }
-            RenderedRun::Image { protocol, height } => {
-                // ratatui-image's allow_clipping(true) handles the
-                // bottom-clipped case (image extends below viewport) by
-                // truncating the rendered area. Top-clipping (image's top
-                // scrolled off the viewport) we still can't do cleanly —
-                // the widget always renders from row 0 of the image — so
-                // we skip when the image's top is above the viewport.
+            RenderedRun::Image { protocol, .. } => {
+                // Image widget always starts from row 0 — can't render
+                // just the bottom of an image when its top is above us.
                 let top_clipped = i == start_run && skip_in_run > 0;
                 if !top_clipped {
-                    let _ = height;
                     frame.render_widget(Image::new(protocol).allow_clipping(true), rect);
                 }
             }
