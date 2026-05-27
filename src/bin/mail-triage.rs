@@ -16,7 +16,11 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    MouseEvent, MouseEventKind,
+};
+use crossterm::execute;
 use image::ImageReader;
 use mail::app::{App, AppAction, Input};
 use mail::{BodyRun, Envelope};
@@ -61,7 +65,9 @@ fn main() -> Result<()> {
     // interacts badly with ratatui's terminal setup.
     let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
     let terminal = ratatui::init();
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let result = run(terminal, &mut app, &envelopes, &mailroot, picker);
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result?;
 
@@ -107,13 +113,17 @@ fn run(
             continue;
         }
 
-        let Event::Key(key) = event::read()? else {
-            continue;
+        let input = match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => match map_key(key) {
+                Some(i) => i,
+                None => continue,
+            },
+            Event::Mouse(m) => match map_mouse(m) {
+                Some(i) => i,
+                None => continue,
+            },
+            _ => continue,
         };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        let Some(input) = map_key(key) else { continue };
 
         let action = app.handle(input);
         match action {
@@ -314,6 +324,14 @@ fn map_key(key: KeyEvent) -> Option<Input> {
         KeyCode::Char(c) => Some(Input::Char(c)),
         KeyCode::Up => Some(Input::Up),
         KeyCode::Down => Some(Input::Down),
+        _ => None,
+    }
+}
+
+fn map_mouse(m: MouseEvent) -> Option<Input> {
+    match m.kind {
+        MouseEventKind::ScrollUp => Some(Input::Up),
+        MouseEventKind::ScrollDown => Some(Input::Down),
         _ => None,
     }
 }
