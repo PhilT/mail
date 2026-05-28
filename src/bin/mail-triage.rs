@@ -158,9 +158,37 @@ fn run(
                     Err(e) => format!("parse failed: {e}"),
                 });
             }
-            AppAction::Reply => {
-                app.flash = Some("reply: not implemented yet".to_string());
-            }
+            AppAction::Reply => match edit_reply(&mut terminal, &env.path) {
+                EditOutcome::Saved(body) => {
+                    mail::archive(&env.path, mailroot)?;
+                    cache = None;
+                    let subj = env.subject.clone();
+                    app.advance(AppAction::Archive);
+                    notify(&format!(
+                        "<span foreground='orange'>Sending email ⏵⏵ {}</span>",
+                        pango_escape(&subj)
+                    ));
+                    std::thread::spawn(move || {
+                        let result = send_reply_and_sync(&body);
+                        let esc = pango_escape(&subj);
+                        let msg = match result {
+                            Ok(_) => format!(
+                                "<span foreground='green'>Sent email ⏵⏵ {esc}</span>"
+                            ),
+                            Err(e) => format!(
+                                "<span foreground='red'>Send failed ⏵⏵ {esc}</span>\n{e}"
+                            ),
+                        };
+                        notify(&msg);
+                    });
+                }
+                EditOutcome::Cancelled => {
+                    app.flash = Some("reply cancelled".to_string());
+                }
+                EditOutcome::Failed(why) => {
+                    app.flash = Some(format!("reply failed: {why}"));
+                }
+            },
             AppAction::None
             | AppAction::ScrollUp
             | AppAction::ScrollDown
@@ -168,6 +196,117 @@ fn run(
             | AppAction::ScrollToBottom => {}
         }
     }
+    Ok(())
+}
+
+enum EditOutcome {
+    Saved(Vec<u8>),
+    Cancelled,
+    Failed(String),
+}
+
+fn edit_reply(terminal: &mut DefaultTerminal, msg_path: &std::path::Path) -> EditOutcome {
+    use crossterm::terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    };
+
+    let outcome = (|| -> Result<EditOutcome, String> {
+        let msg = mail::parse_file(msg_path).map_err(|e| format!("parse: {e}"))?;
+        let mid = msg
+            .message_id()
+            .ok_or_else(|| "no Message-ID header".to_string())?
+            .trim_matches(|c: char| c == '<' || c == '>')
+            .to_string();
+
+        let template = std::process::Command::new("notmuch")
+            .args(["reply", "--format=default", &format!("id:{mid}")])
+            .output()
+            .map_err(|e| format!("notmuch reply: {e}"))?;
+        if !template.status.success() {
+            return Err(format!(
+                "notmuch reply exited {}: {}",
+                template.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&template.stderr).trim()
+            ));
+        }
+
+        let tmp = std::env::temp_dir()
+            .join(format!("mail-triage-reply-{}.eml", std::process::id()));
+        std::fs::write(&tmp, &template.stdout).map_err(|e| format!("write tmp: {e}"))?;
+
+        let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        let _ = disable_raw_mode();
+
+        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nvim".to_string());
+        let edit_status = std::process::Command::new(&editor).arg(&tmp).status();
+
+        let _ = enable_raw_mode();
+        let _ = crossterm::execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture);
+        let _ = terminal.clear();
+
+        let edit_status = edit_status.map_err(|e| format!("spawn {editor}: {e}"))?;
+        if !edit_status.success() {
+            let _ = std::fs::remove_file(&tmp);
+            return Ok(EditOutcome::Cancelled);
+        }
+
+        let body = std::fs::read(&tmp).map_err(|e| format!("read tmp: {e}"))?;
+        let _ = std::fs::remove_file(&tmp);
+        Ok(EditOutcome::Saved(body))
+    })();
+
+    match outcome {
+        Ok(o) => o,
+        Err(e) => EditOutcome::Failed(e),
+    }
+}
+
+fn pango_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn notify(body: &str) {
+    let _ = std::process::Command::new("notify-send")
+        .args(["--app-name=mail-triage", "--transient", "Mail", body])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+fn send_reply_and_sync(body: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let body = mail::ensure_mime_headers(body);
+    let mut child = std::process::Command::new("himalaya")
+        .args(["message", "send"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn himalaya: {e}"))?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| "himalaya stdin".to_string())?
+        .write_all(&body)
+        .map_err(|e| format!("write to himalaya: {e}"))?;
+    let send_out = child
+        .wait_with_output()
+        .map_err(|e| format!("himalaya wait: {e}"))?;
+    if !send_out.status.success() {
+        return Err(format!(
+            "himalaya send exited {}: {}",
+            send_out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&send_out.stderr).trim()
+        ));
+    }
+    let _ = std::process::Command::new("/run/current-system/sw/bin/mail-sync")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     Ok(())
 }
 
@@ -430,6 +569,7 @@ fn draw(
         if !loaded.attachment_names.is_empty() {
             parts.push("[w] save attachments".to_string());
         }
+        parts.push("[r] reply".to_string());
         parts.push("[j/k] scroll".to_string());
         parts.push("[q] quit".to_string());
         let footer = format!("  {}", parts.join("  "));

@@ -191,6 +191,21 @@ fn empty_anchor_link_falls_back_to_host_label() {
     assert!(text.contains("[example.com]"), "host fallback missing: {text:?}");
 }
 
+const NO_CONTENT_TYPE: &[u8] = b"From: a@b.com\r\n\
+Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
+\r\n\
+Hello back.\r\n\
+Test message.\r\n";
+
+#[test]
+fn message_without_content_type_renders_as_plaintext() {
+    let msg = MessageParser::default().parse(NO_CONTENT_TYPE).unwrap();
+    let runs = mail::render_body(&msg);
+    let text = flatten_text(&runs);
+    assert!(text.contains("Hello back."), "body missing: {text:?}");
+    assert!(text.contains("Test message."), "body missing: {text:?}");
+}
+
 const PLAIN_WITH_BLANK_RUNS: &[u8] = b"From: a@b.com\r\n\
 Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
 Content-Type: text/plain; charset=utf-8\r\n\
