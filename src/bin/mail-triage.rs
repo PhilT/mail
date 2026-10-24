@@ -14,6 +14,7 @@ use std::env;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::process::Command;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -67,9 +68,17 @@ fn main() -> Result<()> {
     let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
     let terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
-    let result = run(terminal, &mut app, &envelopes, &mailroot, picker);
+    let mut sends = Vec::new();
+    let result = run(terminal, &mut app, &envelopes, &mailroot, picker, &mut sends);
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
+    // Returning from main ends the process, and with it any reply still sending.
+    if sends.iter().any(|s| !s.is_finished()) {
+        println!("waiting for replies to finish sending...");
+    }
+    for send in sends {
+        let _ = send.join();
+    }
     result?;
 
     println!(
@@ -89,6 +98,7 @@ fn run(
     envelopes: &[Envelope],
     mailroot: &PathBuf,
     picker: Picker,
+    sends: &mut Vec<JoinHandle<()>>,
 ) -> Result<()> {
     let mut cache: Option<LoadedMessage> = None;
     const CHORD_TIMEOUT: Duration = Duration::from_secs(5);
@@ -169,7 +179,7 @@ fn run(
                         "<span foreground='orange'>Sending email ⏵⏵ {}</span>",
                         pango_escape(&subj)
                     ));
-                    std::thread::spawn(move || {
+                    sends.push(std::thread::spawn(move || {
                         let result = mail::compose::send(&body).map(|_| mail::compose::sync());
                         let esc = pango_escape(&subj);
                         let msg = match result {
@@ -181,7 +191,7 @@ fn run(
                             ),
                         };
                         notify(&msg);
-                    });
+                    }));
                 }
                 EditOutcome::Cancelled => {
                     app.flash = Some("reply cancelled".to_string());
