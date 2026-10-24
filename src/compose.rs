@@ -161,6 +161,38 @@ pub fn himalaya(args: &[&str]) -> Command {
     cmd
 }
 
+/// The account's signature as `himalaya template write` fills it in, without
+/// the `-- ` line above it. Empty when the account doesn't have one.
+pub fn signature() -> Result<String> {
+    let out = himalaya(&["template", "write"])
+        .output()
+        .context("spawn himalaya")?;
+    if !out.status.success() {
+        bail!(
+            "himalaya template write exited {}: {}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let template = String::from_utf8_lossy(&out.stdout);
+    Ok(template
+        .split_once("\n-- \n")
+        .map(|(_, sig)| sig.to_string())
+        .unwrap_or_default())
+}
+
+/// Puts `signature` at the top of a reply's body, under an empty line to type
+/// on and above the quoted message, matching the replies already in Sent.
+pub fn with_signature(reply: &str, signature: &str) -> String {
+    let signature = signature.trim_end_matches('\n');
+    match reply.split_once("\n\n") {
+        Some((headers, body)) if !signature.is_empty() => {
+            format!("{headers}\n\n\n\n{signature}\n\n{body}")
+        }
+        _ => reply.to_string(),
+    }
+}
+
 /// Sends an MML template and saves a copy to the account's Sent folder.
 pub fn send(template: &str) -> Result<()> {
     let mut child = himalaya(&["template", "send"])

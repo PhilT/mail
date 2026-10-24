@@ -231,9 +231,13 @@ fn edit_reply(terminal: &mut DefaultTerminal, msg_path: &std::path::Path) -> Edi
             ));
         }
 
+        let signature = mail::compose::signature().map_err(|e| format!("{e:#}"))?;
+        let draft =
+            mail::compose::with_signature(&String::from_utf8_lossy(&template.stdout), &signature);
+
         let tmp = std::env::temp_dir()
             .join(format!("mail-triage-reply-{}.eml", std::process::id()));
-        std::fs::write(&tmp, &template.stdout).map_err(|e| format!("write tmp: {e}"))?;
+        std::fs::write(&tmp, draft).map_err(|e| format!("write tmp: {e}"))?;
 
         let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
         let _ = disable_raw_mode();
