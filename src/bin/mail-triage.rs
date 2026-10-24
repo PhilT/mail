@@ -7,7 +7,8 @@
 //! and advances.
 //!
 //! Defaults to `/data/mail/namecheap` as the mailroot; override with
-//! `MAILROOT=/path mail-triage`.
+//! `MAILROOT=/path mail-triage`. Replies go through himalaya's default
+//! account unless `MAIL_ACCOUNT` names another.
 
 use std::env;
 use std::io::Cursor;
@@ -169,7 +170,7 @@ fn run(
                         pango_escape(&subj)
                     ));
                     std::thread::spawn(move || {
-                        let result = send_reply_and_sync(&body);
+                        let result = mail::compose::send(&body).map(|_| mail::compose::sync());
                         let esc = pango_escape(&subj);
                         let msg = match result {
                             Ok(_) => format!(
@@ -200,7 +201,7 @@ fn run(
 }
 
 enum EditOutcome {
-    Saved(Vec<u8>),
+    Saved(String),
     Cancelled,
     Failed(String),
 }
@@ -237,22 +238,17 @@ fn edit_reply(terminal: &mut DefaultTerminal, msg_path: &std::path::Path) -> Edi
         let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
         let _ = disable_raw_mode();
 
-        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nvim".to_string());
-        let edit_status = std::process::Command::new(&editor).arg(&tmp).status();
+        let edited = mail::compose::edit(&tmp);
 
         let _ = enable_raw_mode();
         let _ = crossterm::execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture);
         let _ = terminal.clear();
-
-        let edit_status = edit_status.map_err(|e| format!("spawn {editor}: {e}"))?;
-        if !edit_status.success() {
-            let _ = std::fs::remove_file(&tmp);
-            return Ok(EditOutcome::Cancelled);
-        }
-
-        let body = std::fs::read(&tmp).map_err(|e| format!("read tmp: {e}"))?;
         let _ = std::fs::remove_file(&tmp);
-        Ok(EditOutcome::Saved(body))
+
+        match edited.map_err(|e| format!("{e:#}"))? {
+            Some(body) => Ok(EditOutcome::Saved(body)),
+            None => Ok(EditOutcome::Cancelled),
+        }
     })();
 
     match outcome {
@@ -273,41 +269,6 @@ fn notify(body: &str) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
-}
-
-fn send_reply_and_sync(body: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    use std::process::Stdio;
-
-    let body = mail::ensure_mime_headers(body);
-    let mut child = std::process::Command::new("himalaya")
-        .args(["message", "send"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawn himalaya: {e}"))?;
-    child
-        .stdin
-        .as_mut()
-        .ok_or_else(|| "himalaya stdin".to_string())?
-        .write_all(&body)
-        .map_err(|e| format!("write to himalaya: {e}"))?;
-    let send_out = child
-        .wait_with_output()
-        .map_err(|e| format!("himalaya wait: {e}"))?;
-    if !send_out.status.success() {
-        return Err(format!(
-            "himalaya send exited {}: {}",
-            send_out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&send_out.stderr).trim()
-        ));
-    }
-    let _ = std::process::Command::new("/run/current-system/sw/bin/mail-sync")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    Ok(())
 }
 
 fn load_message<'a>(

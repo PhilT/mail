@@ -1,6 +1,7 @@
 //! Shared library for the `mail-*` binaries.
 
 pub mod app;
+pub mod compose;
 
 mod render;
 
@@ -13,44 +14,6 @@ use mail_parser::MimeHeaders;
 use ratatui::text::Line;
 
 pub use render::render_body;
-
-pub fn ensure_mime_headers(template: &[u8]) -> Vec<u8> {
-    let (eol, boundary) = if let Some(pos) = find_subsequence(template, b"\r\n\r\n") {
-        ("\r\n", pos)
-    } else if let Some(pos) = find_subsequence(template, b"\n\n") {
-        ("\n", pos)
-    } else {
-        return template.to_vec();
-    };
-
-    let headers = &template[..boundary];
-    let lower: String = headers.iter().map(|b| b.to_ascii_lowercase() as char).collect();
-    if lower.contains("\ncontent-type:") || lower.starts_with("content-type:") {
-        return template.to_vec();
-    }
-
-    let mut injected = String::new();
-    if !lower.contains("\nmime-version:") && !lower.starts_with("mime-version:") {
-        injected.push_str("MIME-Version: 1.0");
-        injected.push_str(eol);
-    }
-    injected.push_str("Content-Type: text/plain; charset=utf-8");
-    injected.push_str(eol);
-    injected.push_str("Content-Transfer-Encoding: 8bit");
-
-    let mut out = Vec::with_capacity(template.len() + injected.len() + eol.len());
-    out.extend_from_slice(&template[..boundary]);
-    out.extend_from_slice(eol.as_bytes());
-    out.extend_from_slice(injected.as_bytes());
-    out.extend_from_slice(&template[boundary..]);
-    out
-}
-
-fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
-}
 
 pub fn url_label(url: &str) -> String {
     let (scheme, rest) = match url.split_once("://") {

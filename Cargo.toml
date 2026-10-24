@@ -13,6 +13,10 @@ name = "mail-triage"
 path = "src/bin/mail-triage.rs"
 
 [[bin]]
+name = "mail-send"
+path = "src/bin/mail-send.rs"
+
+[[bin]]
 name = "mail-dump"
 path = "src/bin/mail-dump.rs"
 
